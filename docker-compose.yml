@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  cex-reporter:
+    build: .
+    container_name: alkimi-cex-reporter
+    env_file: .env
+    volumes:
+      # Persist trade cache and snapshots
+      - ./data:/app/data
+      # Persist logs
+      - ./logs:/app/logs
+      # Mount deposits file (read-only)
+      - "./deposits & withdrawals.xlsx:/app/deposits & withdrawals.xlsx:ro"
+    restart: unless-stopped
+    environment:
+      - MOCK_MODE=false
+      - LOG_LEVEL=INFO
+    networks:
+      - alkimi-net
+
+  # Optional: PostgreSQL for production (Railway provides this)
+  postgres:
+    image: postgres:15-alpine
+    container_name: alkimi-postgres
+    environment:
+      POSTGRES_USER: alkimi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alkimi_dev}
+      POSTGRES_DB: cex_reporter
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - alkimi-net
+    profiles:
+      - with-postgres
+
+networks:
+  alkimi-net:
+    driver: bridge
+
+volumes:
+  postgres_data:

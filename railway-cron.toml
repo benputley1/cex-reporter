@@ -1,0 +1,18 @@
+# Railway Configuration for ALKIMI Data Refresh Cron Service
+# This service runs hourly to fetch and cache CEX/DEX trade data
+#
+# IMPORTANT: When deploying as a cron service in Railway:
+# 1. Create a new service and select "Cron" as the service type
+# 2. The cron schedule is configured via Railway UI, not this file
+# 3. Recommended schedule: "0 * * * *" (every hour at :00)
+# 4. Both this service and the bot service should mount the same volume at /app/data
+
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "python main.py --mode refresh"
+restartPolicyType = "NEVER"
+
+# Note: Railway cron services don't need health checks or internal ports
+# The service will run, execute the command, and exit

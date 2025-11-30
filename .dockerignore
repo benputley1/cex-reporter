@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+.eggs/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Local data (will be mounted as volumes)
+data/
+logs/
+*.db
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Environment files (secrets loaded via Railway)
+.env
+.env.*
+!.env.example
+
+# Development files
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,70 @@
+# Environment variables
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data & Logs
+data/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent coordination files
+task_status.json
+task_queue.json
+agent_logs/
+
+# Claude Code settings
+.claude/
+
+# Backup files
+*.bak
+*.backup
+
+# Exchange data (may contain sensitive reports)
+Exchange Data/
+"Exchange Data /"
+
+# API credential files
+*.rtf
+config/*.rtf

@@ -1,0 +1,19 @@
+# ALKIMI Slack Bot Dependencies
+#
+# Install with: pip install -r requirements-bot.txt
+
+# Slack SDK
+slack-bolt>=1.18.0
+
+# Anthropic Claude API
+anthropic>=0.18.0
+
+# Core dependencies
+pandas>=2.0.0
+python-dotenv>=1.0.0
+
+# Data access
+requests>=2.31.0
+
+# Already in main requirements but listed for completeness
+# These should be available from requirements.txt
