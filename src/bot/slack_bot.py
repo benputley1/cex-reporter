@@ -18,10 +18,22 @@ Integrates:
 import os
 import re
 import asyncio
+import random
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Set
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+
+# Thinking messages to show while processing
+THINKING_MESSAGES = [
+    "Pulling the data...",
+    "Checking the numbers...",
+    "On it...",
+    "Looking into that...",
+    "One sec...",
+    "Crunching the numbers...",
+    "Querying the database...",
+]
 
 from src.bot.data_provider import DataProvider
 from src.bot.query_router import QueryRouter, QueryIntent
@@ -95,6 +107,9 @@ class AlkimiBot:
             self.agent = None
             logger.info("Using legacy keyword-based routing")
 
+        # Track threads the bot has participated in (for auto-responding)
+        self.active_threads: Set[str] = set()
+
         # Register handlers
         self._register_handlers()
 
@@ -106,14 +121,28 @@ class AlkimiBot:
         # App mention handler (when bot is @mentioned)
         @self.app.event("app_mention")
         async def handle_mention(event, say):
-            await self._handle_query(event, say)
+            # Track this thread as active
+            thread_ts = event.get("ts")
+            if thread_ts:
+                self.active_threads.add(thread_ts)
+            await self._handle_query(event, say, is_mention=True)
 
-        # Direct message handler
+        # Direct message and thread reply handler
         @self.app.event("message")
-        async def handle_dm(event, say):
-            # Only handle DMs (not channel messages without mention)
+        async def handle_message(event, say):
+            # Skip bot's own messages
+            if event.get("bot_id"):
+                return
+
+            # Handle DMs
             if event.get("channel_type") == "im":
-                await self._handle_query(event, say)
+                await self._handle_query(event, say, is_mention=False)
+                return
+
+            # Handle thread replies (no @mention needed if bot is in thread)
+            thread_ts = event.get("thread_ts")
+            if thread_ts and thread_ts in self.active_threads:
+                await self._handle_query(event, say, is_mention=False)
 
         # Slash command: /alkimi
         @self.app.command("/alkimi")
@@ -121,20 +150,30 @@ class AlkimiBot:
             await ack()
             await self._handle_slash_command(command, say)
 
-    async def _handle_query(self, event: Dict, say):
+    async def _handle_query(self, event: Dict, say, is_mention: bool = False):
         """Handle natural language query from mention or DM."""
         text = event.get("text", "")
         user = event.get("user", "unknown")
-        thread_ts = event.get("thread_ts") or event.get("ts")  # Use thread_ts for replies, ts for new messages
+
+        # For @mentions, always start a new thread using the message ts
+        # For thread replies, use the existing thread_ts
+        if is_mention:
+            thread_ts = event.get("ts")  # Start new thread from the mention
+        else:
+            thread_ts = event.get("thread_ts") or event.get("ts")
 
         # Remove bot mention from text
         text = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
         if not text:
-            await say(blocks=self.formatter.format_help())
+            await say(blocks=self.formatter.format_help(), thread_ts=thread_ts)
             return
 
         logger.info(f"Query from {user}: {text}")
+
+        # Send immediate thinking message
+        thinking_msg = random.choice(THINKING_MESSAGES)
+        await say(text=thinking_msg, thread_ts=thread_ts)
 
         try:
             # Use conversational agent if enabled
