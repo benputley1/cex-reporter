@@ -733,6 +733,9 @@ class ConversationalAgent:
         """
         self._cleanup_old_threads()
 
+        # Track processing time
+        start_time = time.time()
+
         # Build system prompt with current date
         system = SYSTEM_PROMPT.format(current_date=date.today().isoformat())
 
@@ -806,9 +809,26 @@ class ConversationalAgent:
             # Add assistant response to history
             self._add_to_history(thread_ts, "assistant", final_text)
 
+            # Calculate processing time
+            processing_time_ms = int((time.time() - start_time) * 1000)
+
             # Log tools used
             if tools_used:
                 logger.info(f"Query processed using tools: {', '.join(tools_used)}")
+
+            # Save conversation for fine-tuning
+            try:
+                self.data_provider.save_conversation_log(
+                    thread_ts=thread_ts,
+                    user_id=user_id,
+                    user_message=message,
+                    assistant_response=final_text,
+                    tools_used=tools_used,
+                    model=self.model,
+                    processing_time_ms=processing_time_ms
+                )
+            except Exception as log_error:
+                logger.warning(f"Failed to save conversation log: {log_error}")
 
             return {
                 "text": final_text,

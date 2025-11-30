@@ -148,6 +148,31 @@ class DataProvider:
                 ON otc_transactions(date DESC)
             """)
 
+            # Conversation logs table for fine-tuning data
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_ts TEXT,
+                    user_id TEXT NOT NULL,
+                    user_message TEXT NOT NULL,
+                    assistant_response TEXT NOT NULL,
+                    tools_used TEXT,
+                    model TEXT,
+                    processing_time_ms INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversation_logs_thread
+                ON conversation_logs(thread_ts, created_at)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversation_logs_user
+                ON conversation_logs(user_id, created_at DESC)
+            """)
+
             conn.commit()
             logger.info("Database migrations applied successfully")
 
@@ -535,6 +560,47 @@ class DataProvider:
                 cursor = conn.execute(query, (limit,))
 
             return [dict(row) for row in cursor.fetchall()]
+
+    def save_conversation_log(
+        self,
+        thread_ts: str,
+        user_id: str,
+        user_message: str,
+        assistant_response: str,
+        tools_used: Optional[List[str]] = None,
+        model: Optional[str] = None,
+        processing_time_ms: Optional[int] = None
+    ) -> int:
+        """
+        Save a conversation exchange for fine-tuning data.
+
+        Args:
+            thread_ts: Slack thread timestamp
+            user_id: User ID who sent the message
+            user_message: The user's message text
+            assistant_response: The bot's response text
+            tools_used: List of tool names used (will be JSON serialized)
+            model: Model name used for the response
+            processing_time_ms: Time taken to process the request
+
+        Returns:
+            ID of the saved conversation record
+        """
+        tools_json = json.dumps(tools_used) if tools_used else None
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                INSERT INTO conversation_logs (
+                    thread_ts, user_id, user_message, assistant_response,
+                    tools_used, model, processing_time_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                thread_ts, user_id, user_message, assistant_response,
+                tools_json, model, processing_time_ms
+            ))
+            conn.commit()
+            logger.debug(f"Saved conversation log for user {user_id}")
+            return cursor.lastrowid
 
     async def save_function(
         self,
