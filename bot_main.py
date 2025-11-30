@@ -106,25 +106,48 @@ def check_data_directories():
 
 def seed_data_if_empty():
     """
-    Copy seed data to data directory if database doesn't exist.
+    Copy seed data to data directory if database is empty or doesn't exist.
 
     This handles the Railway volume mount issue where the volume
     shadows files from git. Seed data is stored in seed_data/ and
     copied to data/ on first run.
     """
     import shutil
+    import sqlite3
 
     db_path = Path("data/trade_cache.db")
     seed_db_path = Path("seed_data/trade_cache.db")
     seed_snapshots_path = Path("seed_data/snapshots")
 
-    # Check if we need to seed the database
-    if not db_path.exists() and seed_db_path.exists():
+    needs_seeding = False
+
+    # Check if database exists and has data
+    if not db_path.exists():
+        logger.info("No database found - will seed from seed_data/")
+        needs_seeding = True
+    else:
+        # Check if database has any trades
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.execute("SELECT COUNT(*) FROM trades")
+            count = cursor.fetchone()[0]
+            conn.close()
+            if count == 0:
+                logger.info(f"Database exists but has 0 trades - will seed from seed_data/")
+                needs_seeding = True
+            else:
+                logger.info(f"Database exists with {count} trades")
+        except Exception as e:
+            logger.warning(f"Could not check database: {e} - will seed from seed_data/")
+            needs_seeding = True
+
+    # Seed if needed
+    if needs_seeding and seed_db_path.exists():
         logger.info("=" * 60)
         logger.info("SEEDING DATA FROM seed_data/")
         logger.info("=" * 60)
 
-        # Copy database
+        # Copy database (overwrite if exists but empty)
         logger.info(f"Copying {seed_db_path} -> {db_path}")
         shutil.copy2(seed_db_path, db_path)
 
@@ -139,10 +162,8 @@ def seed_data_if_empty():
 
         logger.info("Seed data copied successfully!")
         logger.info("=" * 60)
-    elif not db_path.exists():
-        logger.warning("No database found and no seed data available")
-    else:
-        logger.info(f"Database exists at {db_path}")
+    elif needs_seeding:
+        logger.warning("Database needs seeding but no seed data available at seed_data/")
 
 
 def display_startup_banner():
