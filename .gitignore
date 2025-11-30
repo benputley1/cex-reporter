@@ -40,9 +40,9 @@ htmlcov/
 *.swo
 *~
 
-# Data & Logs
-data/
-logs/
+# Data & Logs (root level only, not src/data/)
+/data/
+/logs/
 *.log
 
 # OS
