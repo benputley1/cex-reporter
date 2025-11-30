@@ -104,6 +104,47 @@ def check_data_directories():
             path.mkdir(parents=True, exist_ok=True)
 
 
+def seed_data_if_empty():
+    """
+    Copy seed data to data directory if database doesn't exist.
+
+    This handles the Railway volume mount issue where the volume
+    shadows files from git. Seed data is stored in seed_data/ and
+    copied to data/ on first run.
+    """
+    import shutil
+
+    db_path = Path("data/trade_cache.db")
+    seed_db_path = Path("seed_data/trade_cache.db")
+    seed_snapshots_path = Path("seed_data/snapshots")
+
+    # Check if we need to seed the database
+    if not db_path.exists() and seed_db_path.exists():
+        logger.info("=" * 60)
+        logger.info("SEEDING DATA FROM seed_data/")
+        logger.info("=" * 60)
+
+        # Copy database
+        logger.info(f"Copying {seed_db_path} -> {db_path}")
+        shutil.copy2(seed_db_path, db_path)
+
+        # Copy snapshots
+        if seed_snapshots_path.exists():
+            snapshots_dest = Path("data/snapshots")
+            for snapshot_file in seed_snapshots_path.glob("*.json"):
+                dest_file = snapshots_dest / snapshot_file.name
+                if not dest_file.exists():
+                    logger.info(f"Copying {snapshot_file.name}")
+                    shutil.copy2(snapshot_file, dest_file)
+
+        logger.info("Seed data copied successfully!")
+        logger.info("=" * 60)
+    elif not db_path.exists():
+        logger.warning("No database found and no seed data available")
+    else:
+        logger.info(f"Database exists at {db_path}")
+
+
 def display_startup_banner():
     """Display startup banner with configuration info."""
     logger.info("=" * 60)
@@ -140,6 +181,7 @@ async def main():
     # Check configuration
     check_env_vars()
     check_data_directories()
+    seed_data_if_empty()
 
     # Display startup info
     display_startup_banner()
