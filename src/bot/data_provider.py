@@ -11,7 +11,7 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 from src.data.trade_cache import TradeCache
 from src.data.daily_snapshot import DailySnapshot
@@ -171,6 +171,15 @@ class DataProvider:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_conversation_logs_user
                 ON conversation_logs(user_id, created_at DESC)
+            """)
+
+            # Active threads table for thread reply tracking (survives restarts)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS active_threads (
+                    thread_ts TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             """)
 
             conn.commit()
@@ -601,6 +610,73 @@ class DataProvider:
             conn.commit()
             logger.debug(f"Saved conversation log for user {user_id}")
             return cursor.lastrowid
+
+    def add_active_thread(self, thread_ts: str, channel_id: str) -> None:
+        """
+        Track a thread the bot is participating in.
+
+        Args:
+            thread_ts: Slack thread timestamp (primary identifier)
+            channel_id: Channel ID where the thread is located
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO active_threads (thread_ts, channel_id) VALUES (?, ?)",
+                (thread_ts, channel_id)
+            )
+            conn.commit()
+        logger.debug(f"Added active thread: {thread_ts} in channel {channel_id}")
+
+    def is_active_thread(self, thread_ts: str) -> bool:
+        """
+        Check if bot is participating in this thread.
+
+        Args:
+            thread_ts: Slack thread timestamp
+
+        Returns:
+            True if the bot is tracking this thread
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM active_threads WHERE thread_ts = ?",
+                (thread_ts,)
+            )
+            return cursor.fetchone() is not None
+
+    def load_active_threads(self) -> Set[str]:
+        """
+        Load all active thread IDs (for startup).
+
+        Returns:
+            Set of thread_ts values the bot is participating in
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT thread_ts FROM active_threads")
+            threads = {row[0] for row in cursor.fetchall()}
+        logger.info(f"Loaded {len(threads)} active threads from database")
+        return threads
+
+    def cleanup_old_threads(self, days: int = 30) -> int:
+        """
+        Remove threads older than specified days to prevent unbounded growth.
+
+        Args:
+            days: Remove threads older than this many days
+
+        Returns:
+            Number of threads removed
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM active_threads WHERE created_at < datetime('now', ?)",
+                (f'-{days} days',)
+            )
+            conn.commit()
+            removed = cursor.rowcount
+        if removed > 0:
+            logger.info(f"Cleaned up {removed} threads older than {days} days")
+        return removed
 
     async def save_function(
         self,

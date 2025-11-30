@@ -108,7 +108,11 @@ class AlkimiBot:
             logger.info("Using legacy keyword-based routing")
 
         # Track threads the bot has participated in (for auto-responding)
-        self.active_threads: Set[str] = set()
+        # Load from database so threads survive restarts/deploys
+        self.active_threads: Set[str] = self.data_provider.load_active_threads()
+
+        # Cleanup old threads (30+ days) to prevent unbounded growth
+        self.data_provider.cleanup_old_threads(days=30)
 
         # Register handlers
         self._register_handlers()
@@ -121,10 +125,13 @@ class AlkimiBot:
         # App mention handler (when bot is @mentioned)
         @self.app.event("app_mention")
         async def handle_mention(event, say):
-            # Track this thread as active
+            # Track this thread as active (both in memory and database)
             thread_ts = event.get("ts")
+            channel_id = event.get("channel")
             if thread_ts:
                 self.active_threads.add(thread_ts)
+                # Persist to database so thread survives restarts
+                self.data_provider.add_active_thread(thread_ts, channel_id)
             await self._handle_query(event, say, is_mention=True)
 
         # Direct message and thread reply handler
