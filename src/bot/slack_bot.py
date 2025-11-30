@@ -31,9 +31,13 @@ from src.bot.function_store import FunctionStore
 from src.bot.pnl_config import PnLConfig, OTCManager, PnLCalculator, CostBasisMethod
 from src.bot.prompts import ClaudeClient
 from src.bot.formatters import SlackFormatter
+from src.bot.conversational_agent import ConversationalAgent
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+# Feature flag for conversational agent (set to false to use legacy keyword routing)
+USE_CONVERSATIONAL_AGENT = os.environ.get("USE_CONVERSATIONAL_AGENT", "true").lower() == "true"
 
 
 class AlkimiBot:
@@ -80,6 +84,17 @@ class AlkimiBot:
         )
         self.formatter = SlackFormatter()
 
+        # Initialize conversational agent if enabled
+        if USE_CONVERSATIONAL_AGENT:
+            self.agent = ConversationalAgent(
+                anthropic_api_key=anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY"),
+                data_provider=self.data_provider
+            )
+            logger.info("ConversationalAgent enabled for natural language queries")
+        else:
+            self.agent = None
+            logger.info("Using legacy keyword-based routing")
+
         # Register handlers
         self._register_handlers()
 
@@ -110,6 +125,7 @@ class AlkimiBot:
         """Handle natural language query from mention or DM."""
         text = event.get("text", "")
         user = event.get("user", "unknown")
+        thread_ts = event.get("thread_ts") or event.get("ts")  # Use thread_ts for replies, ts for new messages
 
         # Remove bot mention from text
         text = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
@@ -121,7 +137,26 @@ class AlkimiBot:
         logger.info(f"Query from {user}: {text}")
 
         try:
-            # Classify intent
+            # Use conversational agent if enabled
+            if self.agent:
+                response = await self.agent.process(
+                    message=text,
+                    user_id=user,
+                    thread_ts=thread_ts
+                )
+
+                # Send response
+                response_text = response.get("text", "I couldn't process that request.")
+
+                # Add context about tools used (optional, can be removed for cleaner output)
+                if response.get("tools_used"):
+                    tools_str = ", ".join(response["tools_used"])
+                    logger.debug(f"Tools used: {tools_str}")
+
+                await say(text=response_text, thread_ts=thread_ts)
+                return
+
+            # Legacy: keyword-based routing
             intent = self.router.classify(text)
             params = self.router.extract_parameters(text, intent)
 
