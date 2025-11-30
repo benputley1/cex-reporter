@@ -75,7 +75,7 @@ class AlkimiBot:
         self.otc = OTCManager()
         self.pnl_calc = PnLCalculator(
             data_provider=self.data_provider,
-            config=self.pnl_config,
+            pnl_config=self.pnl_config,
             otc_manager=self.otc
         )
         self.formatter = SlackFormatter()
