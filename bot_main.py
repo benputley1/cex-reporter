@@ -133,7 +133,7 @@ def seed_data_if_empty():
             count = cursor.fetchone()[0]
             conn.close()
             if count == 0:
-                logger.info(f"Database exists but has 0 trades - will seed from seed_data/")
+                logger.info("Database exists but has 0 trades - will seed from seed_data/")
                 needs_seeding = True
             else:
                 logger.info(f"Database exists with {count} trades")
