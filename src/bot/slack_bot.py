@@ -110,9 +110,12 @@ class AlkimiBot:
         # Track threads the bot has participated in (for auto-responding)
         # Load from database so threads survive restarts/deploys
         self.active_threads: Set[str] = self.data_provider.load_active_threads()
+        logger.info(f"Loaded {len(self.active_threads)} active threads from database")
 
         # Cleanup old threads (30+ days) to prevent unbounded growth
-        self.data_provider.cleanup_old_threads(days=30)
+        cleaned = self.data_provider.cleanup_old_threads(days=30)
+        if cleaned > 0:
+            logger.info(f"Cleaned up {cleaned} old threads")
 
         # Register handlers
         self._register_handlers()
@@ -148,8 +151,16 @@ class AlkimiBot:
 
             # Handle thread replies (no @mention needed if bot is in thread)
             thread_ts = event.get("thread_ts")
-            if thread_ts and thread_ts in self.active_threads:
-                await self._handle_query(event, say, is_mention=False)
+            if thread_ts:
+                is_active = thread_ts in self.active_threads
+                logger.info(
+                    f"Thread reply detected: thread_ts={thread_ts}, "
+                    f"is_active={is_active}, active_count={len(self.active_threads)}"
+                )
+                if is_active:
+                    await self._handle_query(event, say, is_mention=False)
+                else:
+                    logger.debug(f"Ignoring thread reply - thread {thread_ts} not in active_threads")
 
         # Slash command: /alkimi
         @self.app.command("/alkimi")

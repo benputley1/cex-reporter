@@ -345,6 +345,103 @@ TOOLS = [
             },
             "required": []
         }
+    },
+    # DEX & On-Chain Tools
+    {
+        "name": "get_dex_trades",
+        "description": "Get DEX trades for ALKIMI token on Sui blockchain (Cetus, Turbos, BlueMove, Aftermath). Shows swap activity across decentralized exchanges.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "Start date (YYYY-MM-DD or 'today', 'this week'). Default: 7 days ago"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum trades to return (default 50, max 100)"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_alkimi_pools",
+        "description": "Get liquidity pool data for ALKIMI across Sui DEXs. Shows TVL, 24h volume, price, and liquidity depth.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "get_onchain_analytics",
+        "description": "Get on-chain analytics for ALKIMI token: holder count, top holders, supply distribution, wallet activity.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "get_treasury_value",
+        "description": "Get the total treasury value including USDT and ALKIMI holdings across all wallets.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "get_top_holders",
+        "description": "Get list of top ALKIMI token holders on Sui blockchain with their balances and percentages.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of top holders to return (default 10, max 50)"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_wallet_activity",
+        "description": "Get recent activity for a specific wallet address including transactions, swaps, and balance changes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string",
+                    "description": "Sui wallet address to track"
+                }
+            },
+            "required": ["address"]
+        }
+    },
+    {
+        "name": "get_market_data",
+        "description": "Get comprehensive market data for ALKIMI from CoinGecko: price, 24h change, volume, market cap.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "get_query_history",
+        "description": "Get history of recent queries made to the bot by a user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of queries to return (default 10, max 50)"
+                }
+            },
+            "required": []
+        }
     }
 ]
 
@@ -706,6 +803,148 @@ class ConversationalAgent:
                     'count': len(snapshots),
                     'snapshots': snapshots
                 }, indent=2)
+
+            elif tool_name == "get_dex_trades":
+                since = self._parse_date(tool_input.get('since'))
+                if since is None:
+                    since = datetime.now() - timedelta(days=7)
+                limit = min(tool_input.get('limit', 50), 100)
+
+                df = await self.data_provider.get_dex_trades(since=since)
+
+                if df.empty:
+                    return "No DEX trades found. Sui DEX monitor may not be configured or no recent swaps occurred."
+
+                # Format trades
+                trades_list = []
+                for _, row in df.head(limit).iterrows():
+                    trades_list.append({
+                        'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                        'exchange': row.get('exchange', 'sui_dex'),
+                        'side': row.get('side', 'unknown'),
+                        'amount': float(row['amount']) if 'amount' in row else 0,
+                        'price': float(row['price']) if 'price' in row else 0,
+                        'value_usd': float(row['amount'] * row['price']) if 'amount' in row and 'price' in row else 0
+                    })
+
+                return json.dumps({
+                    'count': len(trades_list),
+                    'dex': 'Sui (Cetus, Turbos, BlueMove, Aftermath)',
+                    'trades': trades_list
+                }, indent=2)
+
+            elif tool_name == "get_alkimi_pools":
+                if not self.data_provider.sui_monitor:
+                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
+
+                try:
+                    pools = await self.data_provider.sui_monitor.get_alkimi_pools()
+                    if not pools:
+                        return "No liquidity pools found for ALKIMI on Sui DEXs."
+                    return json.dumps(pools, indent=2, default=str)
+                except Exception as e:
+                    logger.error(f"Error fetching pools: {e}")
+                    return f"Error fetching pool data: {str(e)}"
+
+            elif tool_name == "get_onchain_analytics":
+                if not self.data_provider.sui_monitor:
+                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
+
+                try:
+                    analytics = await self.data_provider.sui_monitor.get_onchain_analytics()
+                    if not analytics:
+                        return "Unable to fetch on-chain analytics."
+                    return json.dumps(analytics, indent=2, default=str)
+                except Exception as e:
+                    logger.error(f"Error fetching analytics: {e}")
+                    return f"Error fetching on-chain analytics: {str(e)}"
+
+            elif tool_name == "get_treasury_value":
+                if not self.data_provider.sui_monitor:
+                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
+
+                try:
+                    treasury = await self.data_provider.sui_monitor.get_treasury_value()
+                    if not treasury:
+                        return "Unable to fetch treasury value."
+                    return json.dumps({
+                        'total_value_usd': treasury.total_value_usd,
+                        'usdt_balance': treasury.usdt_balance,
+                        'alkimi_balance': treasury.alkimi_balance,
+                        'alkimi_value_usd': treasury.alkimi_value_usd,
+                        'alkimi_price': treasury.alkimi_price,
+                        'timestamp': treasury.timestamp.isoformat() if hasattr(treasury.timestamp, 'isoformat') else str(treasury.timestamp)
+                    }, indent=2)
+                except Exception as e:
+                    logger.error(f"Error fetching treasury value: {e}")
+                    return f"Error fetching treasury value: {str(e)}"
+
+            elif tool_name == "get_top_holders":
+                if not self.data_provider.sui_monitor:
+                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
+
+                limit = min(tool_input.get('limit', 10), 50)
+                try:
+                    holders = await self.data_provider.sui_monitor.get_top_holders(limit=limit)
+                    if not holders:
+                        return "Unable to fetch top holders."
+
+                    holders_list = []
+                    for h in holders:
+                        holders_list.append({
+                            'address': h.address,
+                            'balance': h.balance,
+                            'percentage': h.percentage,
+                            'label': h.label if hasattr(h, 'label') else None
+                        })
+                    return json.dumps({
+                        'count': len(holders_list),
+                        'holders': holders_list
+                    }, indent=2)
+                except Exception as e:
+                    logger.error(f"Error fetching top holders: {e}")
+                    return f"Error fetching top holders: {str(e)}"
+
+            elif tool_name == "get_wallet_activity":
+                if not self.data_provider.sui_monitor:
+                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
+
+                address = tool_input.get('address', '')
+                if not address:
+                    return "Wallet address is required."
+
+                try:
+                    activity = await self.data_provider.sui_monitor.get_wallet_activity(address)
+                    if not activity:
+                        return f"No activity found for wallet {address}."
+                    return json.dumps(activity, indent=2, default=str)
+                except Exception as e:
+                    logger.error(f"Error fetching wallet activity: {e}")
+                    return f"Error fetching wallet activity: {str(e)}"
+
+            elif tool_name == "get_market_data":
+                try:
+                    market_data = await self.data_provider.get_market_data()
+                    if not market_data:
+                        return "Unable to fetch market data from CoinGecko."
+                    return json.dumps(market_data, indent=2, default=str)
+                except Exception as e:
+                    logger.error(f"Error fetching market data: {e}")
+                    return f"Error fetching market data: {str(e)}"
+
+            elif tool_name == "get_query_history":
+                limit = min(tool_input.get('limit', 10), 50)
+                try:
+                    history = await self.data_provider.get_query_history(user_id=user_id, limit=limit)
+                    if not history:
+                        return "No query history found."
+                    return json.dumps({
+                        'count': len(history),
+                        'queries': history
+                    }, indent=2, default=str)
+                except Exception as e:
+                    logger.error(f"Error fetching query history: {e}")
+                    return f"Error fetching query history: {str(e)}"
 
             else:
                 return f"Unknown tool: {tool_name}"

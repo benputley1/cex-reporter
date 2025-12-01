@@ -46,6 +46,8 @@ import os
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -54,6 +56,28 @@ from src.bot.slack_bot import create_bot
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+# Global scheduler reference
+scheduler = None
+
+
+async def run_refresh_task():
+    """Background task to refresh trade data from exchanges."""
+    try:
+        logger.info("=" * 40)
+        logger.info("SCHEDULED DATA REFRESH STARTING")
+        logger.info("=" * 40)
+
+        # Import here to avoid circular imports
+        from main import CEXReporter
+
+        reporter = CEXReporter()
+        await reporter.run_refresh()
+
+        logger.info("Scheduled data refresh completed successfully")
+
+    except Exception as e:
+        logger.error(f"Scheduled refresh failed: {e}", exc_info=True)
 
 
 def check_env_vars():
@@ -196,6 +220,8 @@ def display_startup_banner():
 
 async def main():
     """Main entry point."""
+    global scheduler
+
     # Load environment variables from .env file
     load_dotenv()
 
@@ -208,6 +234,23 @@ async def main():
     display_startup_banner()
 
     try:
+        # Start background scheduler for data refresh
+        refresh_interval = int(os.environ.get("REFRESH_INTERVAL_HOURS", "1"))
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(
+            run_refresh_task,
+            trigger=IntervalTrigger(hours=refresh_interval),
+            id='data_refresh',
+            name='Hourly data refresh from exchanges',
+            replace_existing=True
+        )
+        scheduler.start()
+        logger.info(f"Background scheduler started - refresh every {refresh_interval} hour(s)")
+
+        # Run initial refresh on startup
+        logger.info("Running initial data refresh...")
+        await run_refresh_task()
+
         # Create and start bot
         bot = create_bot()
         await bot.start()
