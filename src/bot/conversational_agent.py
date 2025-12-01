@@ -15,6 +15,7 @@ import time
 
 import anthropic
 
+from config.settings import settings
 from src.bot.data_provider import DataProvider
 from src.bot.query_engine import QueryEngine
 from src.bot.python_executor import SafePythonExecutor
@@ -476,7 +477,7 @@ class ConversationalAgent:
             api_key=anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
         )
         self.model = model
-        self.data_provider = data_provider or DataProvider()
+        self.data_provider = data_provider or DataProvider(sui_config=settings.sui_config)
 
         # Initialize components
         self.query_engine = QueryEngine()

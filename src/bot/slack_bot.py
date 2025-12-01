@@ -35,6 +35,7 @@ THINKING_MESSAGES = [
     "Querying the database...",
 ]
 
+from config.settings import settings
 from src.bot.data_provider import DataProvider
 from src.bot.query_router import QueryRouter, QueryIntent
 from src.bot.query_engine import QueryEngine
@@ -79,7 +80,7 @@ class AlkimiBot:
         self.app_token = app_token or os.environ.get("SLACK_APP_TOKEN")
 
         # Initialize components
-        self.data_provider = DataProvider()
+        self.data_provider = DataProvider(sui_config=settings.sui_config)
         self.router = QueryRouter()
         self.claude = ClaudeClient(
             api_key=anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
