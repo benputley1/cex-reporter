@@ -1,0 +1,18 @@
+{
+  "agent": "A1",
+  "task": "schemas",
+  "files_created": [
+    "src/mcp/__init__.py",
+    "src/mcp/schemas.py"
+  ],
+  "models_defined": [
+    "MCPResponse",
+    "TradeData",
+    "BalanceData",
+    "PoolInfo",
+    "HolderInfo",
+    "PnLReport"
+  ],
+  "status": "complete",
+  "timestamp": "2025-12-01T14:40:18.961156Z"
+}

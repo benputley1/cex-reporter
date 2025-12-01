@@ -3,6 +3,13 @@ Conversational Agent for ALKIMI Slack Bot
 
 LLM-first approach using Claude function calling for natural language interactions.
 Replaces keyword-based routing with intelligent intent understanding.
+
+Now uses MCP (Model Context Protocol) for standardized tool responses.
+All tools return MCPResponse with consistent format:
+- success: bool
+- data: Any (tool-specific response data)
+- error: Optional[str] (error message if success=False)
+- metadata: Dict (timestamps, counts, etc.)
 """
 
 import os
@@ -17,10 +24,7 @@ import anthropic
 
 from config.settings import settings
 from src.bot.data_provider import DataProvider
-from src.bot.query_engine import QueryEngine
-from src.bot.python_executor import SafePythonExecutor
-from src.bot.function_store import FunctionStore
-from src.bot.pnl_config import PnLConfig, OTCManager, PnLCalculator, CostBasisMethod
+from src.mcp.server import call_tool
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -457,6 +461,9 @@ class ConversationalAgent:
 
     Handles natural language queries by using Claude to determine intent
     and execute appropriate tools, then formulating helpful responses.
+
+    Uses MCP (Model Context Protocol) for all tool execution, providing
+    standardized MCPResponse format across all data sources.
     """
 
     def __init__(
@@ -470,32 +477,22 @@ class ConversationalAgent:
 
         Args:
             anthropic_api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-            data_provider: DataProvider instance for data access
+            data_provider: DataProvider instance for data access (optional, MCP tools manage their own)
             model: Claude model to use
         """
         self.client = anthropic.Anthropic(
             api_key=anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
         )
         self.model = model
-        self.data_provider = data_provider or DataProvider(sui_config=settings.sui_config)
 
-        # Initialize components
-        self.query_engine = QueryEngine()
-        self.executor = SafePythonExecutor(self.data_provider)
-        self.functions = FunctionStore()
-        self.pnl_config = PnLConfig()
-        self.otc = OTCManager()
-        self.pnl_calc = PnLCalculator(
-            data_provider=self.data_provider,
-            pnl_config=self.pnl_config,
-            otc_manager=self.otc
-        )
+        # DataProvider kept for conversation logging (MCP tools have their own)
+        self.data_provider = data_provider or DataProvider(sui_config=settings.sui_config)
 
         # Thread-based conversation memory
         # {thread_ts: {'messages': [...], 'last_access': timestamp}}
         self.thread_history: Dict[str, Dict] = defaultdict(lambda: {'messages': [], 'last_access': 0})
 
-        logger.info(f"ConversationalAgent initialized with model: {model}")
+        logger.info(f"ConversationalAgent initialized with model: {model} (MCP-enabled)")
 
     def _cleanup_old_threads(self):
         """Remove thread histories that haven't been accessed recently."""
@@ -532,50 +529,12 @@ class ConversationalAgent:
         self.thread_history[thread_ts]['last_access'] = time.time()
         return self.thread_history[thread_ts]['messages']
 
-    def _parse_date(self, date_str: str) -> Optional[datetime]:
-        """Parse flexible date strings into datetime objects."""
-        if not date_str:
-            return None
-
-        date_str = date_str.lower().strip()
-        now = datetime.now()
-
-        # Handle relative dates
-        if date_str == 'today':
-            return datetime.combine(now.date(), datetime.min.time())
-        elif date_str == 'yesterday':
-            return datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
-        elif date_str in ('this week', 'week'):
-            return now - timedelta(days=now.weekday())
-        elif date_str in ('this month', 'month'):
-            return datetime(now.year, now.month, 1)
-        elif date_str in ('last week',):
-            start_of_this_week = now - timedelta(days=now.weekday())
-            return start_of_this_week - timedelta(days=7)
-        elif date_str in ('last month',):
-            first_of_this_month = datetime(now.year, now.month, 1)
-            last_month = first_of_this_month - timedelta(days=1)
-            return datetime(last_month.year, last_month.month, 1)
-
-        # Try ISO date format
-        try:
-            return datetime.fromisoformat(date_str)
-        except ValueError:
-            pass
-
-        # Try other common formats
-        for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y']:
-            try:
-                return datetime.strptime(date_str, fmt)
-            except ValueError:
-                continue
-
-        logger.warning(f"Could not parse date: {date_str}")
-        return None
-
     async def _execute_tool(self, tool_name: str, tool_input: Dict, user_id: str) -> str:
         """
-        Execute a tool and return the result as a string.
+        Execute a tool via MCP and return the result as a string.
+
+        All tools now use the MCP call_tool function which provides
+        standardized MCPResponse format with consistent error handling.
 
         Args:
             tool_name: Name of the tool to execute
@@ -583,376 +542,32 @@ class ConversationalAgent:
             user_id: ID of the user making the request
 
         Returns:
-            String representation of the tool result
+            String representation of the tool result (JSON-formatted)
         """
-        try:
-            logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+        logger.info(f"Executing MCP tool: {tool_name} with input: {tool_input}")
 
-            if tool_name == "get_balances":
-                balances = await self.data_provider.get_balances()
-                if not balances:
-                    return "No balance data available. A snapshot may need to be taken."
-                return json.dumps(balances, indent=2)
+        # Add user_id to tool_input for tools that need it
+        if tool_name in ("add_otc_transaction", "set_cost_basis_method"):
+            tool_input["user_id"] = user_id
 
-            elif tool_name == "get_trades":
-                since = self._parse_date(tool_input.get('since'))
-                until = self._parse_date(tool_input.get('until'))
-                exchange = tool_input.get('exchange')
-                limit = min(tool_input.get('limit', 20), 100)
+        # Call the MCP tool
+        response = await call_tool(tool_name, **tool_input)
 
-                df = await self.data_provider.get_trades_df(
-                    since=since,
-                    until=until,
-                    exchange=exchange
-                )
-
-                # Filter by side if specified
-                if tool_input.get('side'):
-                    df = df[df['side'] == tool_input['side']]
-
-                if df.empty:
-                    return "No trades found for the specified criteria."
-
-                # Limit results
-                df = df.head(limit)
-
-                # Format for display
-                trades_list = []
-                for _, row in df.iterrows():
-                    trades_list.append({
-                        'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
-                        'exchange': row['exchange'],
-                        'side': row['side'],
-                        'amount': float(row['amount']),
-                        'price': float(row['price']),
-                        'value_usd': float(row['amount'] * row['price'])
-                    })
-
-                return json.dumps({
-                    'count': len(trades_list),
-                    'trades': trades_list
-                }, indent=2)
-
-            elif tool_name == "get_trade_summary":
-                since = self._parse_date(tool_input.get('since'))
-                until = self._parse_date(tool_input.get('until'))
-
-                summary = await self.data_provider.get_trade_summary(since=since, until=until)
-                return json.dumps(summary, indent=2, default=str)
-
-            elif tool_name == "get_current_price":
-                price = await self.data_provider.get_current_price()
-                if price is None:
-                    return "Unable to fetch current price. CoinGecko may be unavailable."
-                return json.dumps({'price_usd': price, 'formatted': f"${price:.6f}"})
-
-            elif tool_name == "get_pnl_report":
-                since = self._parse_date(tool_input.get('since'))
-                until = self._parse_date(tool_input.get('until'))
-
-                report = await self.pnl_calc.calculate(since=since, until=until)
-                return json.dumps({
-                    'period': f"{report.period_start.date()} to {report.period_end.date()}",
-                    'realized_pnl': report.realized_pnl,
-                    'unrealized_pnl': report.unrealized_pnl,
-                    'net_pnl': report.net_pnl,
-                    'total_sells': report.total_sells,
-                    'cost_basis': report.total_cost_basis,
-                    'current_holdings': report.current_holdings,
-                    'avg_cost_per_token': report.avg_cost_per_token,
-                    'current_price': report.current_price,
-                    'trade_count': report.trade_count,
-                    'by_exchange': report.by_exchange
-                }, indent=2)
-
-            elif tool_name == "execute_sql":
-                sql = tool_input.get('sql', '')
-                result = self.query_engine.execute_sql(sql)
-
-                if result.error:
-                    return f"SQL Error: {result.error}"
-
-                if result.data is None or result.data.empty:
-                    return "Query returned no results."
-
-                # Convert DataFrame to list of dicts
-                records = result.data.to_dict('records')
-                return json.dumps({
-                    'row_count': len(records),
-                    'columns': list(result.data.columns),
-                    'data': records[:50]  # Limit to 50 rows
-                }, indent=2, default=str)
-
-            elif tool_name == "list_saved_functions":
-                functions = await self.functions.list_all()
-                if not functions:
-                    return "No saved functions found."
-
-                func_list = []
-                for f in functions:
-                    func_list.append({
-                        'name': f.name,
-                        'description': f.description,
-                        'created_by': f.created_by,
-                        'use_count': f.use_count
-                    })
-                return json.dumps(func_list, indent=2)
-
-            elif tool_name == "run_saved_function":
-                name = tool_input.get('name', '')
-                func = await self.functions.get(name)
-
-                if not func:
-                    return f"Function '{name}' not found."
-
-                result = await self.executor.execute(func.code)
-                await self.functions.increment_usage(name)
-
-                if result.error:
-                    return f"Execution error: {result.error}"
-
-                return json.dumps({
-                    'function': name,
-                    'result': result.result,
-                    'stdout': result.stdout
-                }, indent=2, default=str)
-
-            elif tool_name == "get_otc_transactions":
-                transactions = await self.otc.list_all()
-                if not transactions:
-                    return "No OTC transactions recorded."
-
-                otc_list = []
-                for t in transactions:
-                    otc_list.append({
-                        'id': t.id,
-                        'date': t.date.isoformat(),
-                        'side': t.side,
-                        'alkimi_amount': t.alkimi_amount,
-                        'usd_amount': t.usd_amount,
-                        'price': t.price,
-                        'counterparty': t.counterparty
-                    })
-                return json.dumps(otc_list, indent=2)
-
-            elif tool_name == "add_otc_transaction":
-                otc_date = datetime.fromisoformat(tool_input['date'])
-                otc_id = await self.otc.add(
-                    date=otc_date,
-                    alkimi_amount=tool_input['alkimi_amount'],
-                    usd_amount=tool_input['usd_amount'],
-                    side=tool_input['side'],
-                    counterparty=tool_input.get('counterparty'),
-                    notes=tool_input.get('notes'),
-                    created_by=user_id
-                )
-                return json.dumps({
-                    'success': True,
-                    'otc_id': otc_id,
-                    'message': f"OTC transaction #{otc_id} recorded successfully."
-                })
-
-            elif tool_name == "get_pnl_config":
-                config = await self.pnl_config.get_config()
-                method = await self.pnl_config.get_cost_basis_method()
-                return json.dumps({
-                    'cost_basis_method': method.value,
-                    'config': config
-                }, indent=2)
-
-            elif tool_name == "set_cost_basis_method":
-                method_str = tool_input.get('method', 'fifo').lower()
-                method_map = {
-                    'fifo': CostBasisMethod.FIFO,
-                    'lifo': CostBasisMethod.LIFO,
-                    'average': CostBasisMethod.AVERAGE,
-                    'avg': CostBasisMethod.AVERAGE
-                }
-                method = method_map.get(method_str, CostBasisMethod.FIFO)
-                await self.pnl_config.set_cost_basis_method(method, user_id)
-                return json.dumps({
-                    'success': True,
-                    'method': method.value,
-                    'message': f"Cost basis method set to {method.value.upper()}."
-                })
-
-            elif tool_name == "take_snapshot":
-                # This requires fetching live balances - for now return a helpful message
-                # Full implementation would call exchange APIs
-                balances = await self.data_provider.get_balances()
-                if balances:
-                    self.data_provider.snapshot_manager.save_snapshot(balances)
-                    return json.dumps({
-                        'success': True,
-                        'message': 'Snapshot saved successfully.',
-                        'date': date.today().isoformat()
-                    })
-                else:
-                    return json.dumps({
-                        'success': False,
-                        'message': 'No balance data available to snapshot. Run a refresh cycle first.'
-                    })
-
-            elif tool_name == "get_snapshots":
-                days = min(tool_input.get('days', 7), 30)
-                snapshots = await self.data_provider.get_snapshots(days=days)
-
-                if not snapshots:
-                    return "No snapshots found for the specified period."
-
-                return json.dumps({
-                    'count': len(snapshots),
-                    'snapshots': snapshots
-                }, indent=2)
-
-            elif tool_name == "get_dex_trades":
-                since = self._parse_date(tool_input.get('since'))
-                if since is None:
-                    since = datetime.now() - timedelta(days=7)
-                limit = min(tool_input.get('limit', 50), 100)
-
-                df = await self.data_provider.get_dex_trades(since=since)
-
-                if df.empty:
-                    return "No DEX trades found. Sui DEX monitor may not be configured or no recent swaps occurred."
-
-                # Format trades
-                trades_list = []
-                for _, row in df.head(limit).iterrows():
-                    trades_list.append({
-                        'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
-                        'exchange': row.get('exchange', 'sui_dex'),
-                        'side': row.get('side', 'unknown'),
-                        'amount': float(row['amount']) if 'amount' in row else 0,
-                        'price': float(row['price']) if 'price' in row else 0,
-                        'value_usd': float(row['amount'] * row['price']) if 'amount' in row and 'price' in row else 0
-                    })
-
-                return json.dumps({
-                    'count': len(trades_list),
-                    'dex': 'Sui (Cetus, Turbos, BlueMove, Aftermath)',
-                    'trades': trades_list
-                }, indent=2)
-
-            elif tool_name == "get_alkimi_pools":
-                if not self.data_provider.sui_monitor:
-                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
-
-                try:
-                    pools = await self.data_provider.sui_monitor.get_alkimi_pools()
-                    if not pools:
-                        return "No liquidity pools found for ALKIMI on Sui DEXs."
-                    return json.dumps(pools, indent=2, default=str)
-                except Exception as e:
-                    logger.error(f"Error fetching pools: {e}")
-                    return f"Error fetching pool data: {str(e)}"
-
-            elif tool_name == "get_onchain_analytics":
-                if not self.data_provider.sui_monitor:
-                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
-
-                try:
-                    analytics = await self.data_provider.sui_monitor.get_onchain_analytics()
-                    if not analytics:
-                        return "Unable to fetch on-chain analytics."
-                    return json.dumps(analytics, indent=2, default=str)
-                except Exception as e:
-                    logger.error(f"Error fetching analytics: {e}")
-                    return f"Error fetching on-chain analytics: {str(e)}"
-
-            elif tool_name == "get_treasury_value":
-                if not self.data_provider.sui_monitor:
-                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
-
-                try:
-                    treasury = await self.data_provider.sui_monitor.get_treasury_value()
-                    if not treasury:
-                        return "Unable to fetch treasury value."
-                    return json.dumps({
-                        'total_value_usd': treasury.total_value_usd,
-                        'usdt_balance': treasury.usdt_balance,
-                        'alkimi_balance': treasury.alkimi_balance,
-                        'alkimi_value_usd': treasury.alkimi_value_usd,
-                        'alkimi_price': treasury.alkimi_price,
-                        'timestamp': treasury.timestamp.isoformat() if hasattr(treasury.timestamp, 'isoformat') else str(treasury.timestamp)
-                    }, indent=2)
-                except Exception as e:
-                    logger.error(f"Error fetching treasury value: {e}")
-                    return f"Error fetching treasury value: {str(e)}"
-
-            elif tool_name == "get_top_holders":
-                if not self.data_provider.sui_monitor:
-                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
-
-                limit = min(tool_input.get('limit', 10), 50)
-                try:
-                    holders = await self.data_provider.sui_monitor.get_top_holders(limit=limit)
-                    if not holders:
-                        return "Unable to fetch top holders."
-
-                    holders_list = []
-                    for h in holders:
-                        holders_list.append({
-                            'address': h.address,
-                            'balance': h.balance,
-                            'percentage': h.percentage,
-                            'label': h.label if hasattr(h, 'label') else None
-                        })
-                    return json.dumps({
-                        'count': len(holders_list),
-                        'holders': holders_list
-                    }, indent=2)
-                except Exception as e:
-                    logger.error(f"Error fetching top holders: {e}")
-                    return f"Error fetching top holders: {str(e)}"
-
-            elif tool_name == "get_wallet_activity":
-                if not self.data_provider.sui_monitor:
-                    return "Sui DEX monitor not configured. Set ALKIMI_TOKEN_CONTRACT environment variable."
-
-                address = tool_input.get('address', '')
-                if not address:
-                    return "Wallet address is required."
-
-                try:
-                    activity = await self.data_provider.sui_monitor.get_wallet_activity(address)
-                    if not activity:
-                        return f"No activity found for wallet {address}."
-                    return json.dumps(activity, indent=2, default=str)
-                except Exception as e:
-                    logger.error(f"Error fetching wallet activity: {e}")
-                    return f"Error fetching wallet activity: {str(e)}"
-
-            elif tool_name == "get_market_data":
-                try:
-                    market_data = await self.data_provider.get_market_data()
-                    if not market_data:
-                        return "Unable to fetch market data from CoinGecko."
-                    return json.dumps(market_data, indent=2, default=str)
-                except Exception as e:
-                    logger.error(f"Error fetching market data: {e}")
-                    return f"Error fetching market data: {str(e)}"
-
-            elif tool_name == "get_query_history":
-                limit = min(tool_input.get('limit', 10), 50)
-                try:
-                    history = await self.data_provider.get_query_history(user_id=user_id, limit=limit)
-                    if not history:
-                        return "No query history found."
-                    return json.dumps({
-                        'count': len(history),
-                        'queries': history
-                    }, indent=2, default=str)
-                except Exception as e:
-                    logger.error(f"Error fetching query history: {e}")
-                    return f"Error fetching query history: {str(e)}"
-
-            else:
-                return f"Unknown tool: {tool_name}"
-
-        except Exception as e:
-            logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
-            return f"Error executing {tool_name}: {str(e)}"
+        # Format MCPResponse for Claude
+        if response.success:
+            # Return data as JSON string for successful calls
+            if response.data is None:
+                return json.dumps({"success": True, "message": "Operation completed"}, indent=2)
+            return json.dumps(response.data, indent=2, default=str)
+        else:
+            # Return error message for failed calls
+            error_msg = response.error or "Unknown error occurred"
+            logger.error(f"MCP tool {tool_name} failed: {error_msg}")
+            return json.dumps({
+                "success": False,
+                "error": error_msg,
+                "metadata": response.metadata
+            }, indent=2, default=str)
 
     async def process(
         self,
