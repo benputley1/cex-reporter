@@ -595,15 +595,15 @@ class SuiTokenMonitor(ExchangeInterface):
         if self.mock_mode:
             return self._generate_mock_pools()
 
-        if not self._client:
-            logger.warning("Client not initialized, cannot fetch pools")
+        if not self._client or not self.token_contract:
+            logger.warning("Client/token not configured, cannot fetch pools")
             return []
 
         pools = []
         try:
+            # Use token-based endpoint instead of search (search doesn't find ALKIMI)
             response = await self._client.get(
-                f"{GECKOTERMINAL_API}/search/pools",
-                params={"query": "ALKIMI", "network": "sui-network"}
+                f"{GECKOTERMINAL_API}/networks/sui-network/tokens/{self.token_contract}/pools"
             )
 
             if response.status_code != 200:
