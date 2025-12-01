@@ -44,10 +44,12 @@ Example .env file:
 import asyncio
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -59,6 +61,14 @@ logger = get_logger(__name__)
 
 # Global scheduler reference
 scheduler = None
+
+
+def job_listener(event):
+    """Log scheduler job execution results."""
+    if event.exception:
+        logger.error(f"SCHEDULER_JOB_FAILED | job_id={event.job_id} | error={event.exception}")
+    else:
+        logger.info(f"SCHEDULER_JOB_COMPLETED | job_id={event.job_id}")
 
 
 async def run_refresh_task():
@@ -237,15 +247,25 @@ async def main():
         # Start background scheduler for data refresh
         refresh_interval = int(os.environ.get("REFRESH_INTERVAL_HOURS", "1"))
         scheduler = AsyncIOScheduler()
+
+        # Add job listener to log execution results
+        scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+
+        # Calculate next run time
+        next_run = datetime.now() + timedelta(hours=refresh_interval)
+
         scheduler.add_job(
             run_refresh_task,
             trigger=IntervalTrigger(hours=refresh_interval),
             id='data_refresh',
             name='Hourly data refresh from exchanges',
-            replace_existing=True
+            replace_existing=True,
+            misfire_grace_time=300,  # Allow 5 min grace period if job is late
+            next_run_time=next_run
         )
         scheduler.start()
         logger.info(f"Background scheduler started - refresh every {refresh_interval} hour(s)")
+        logger.info(f"Next scheduled refresh: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Run initial refresh on startup
         logger.info("Running initial data refresh...")

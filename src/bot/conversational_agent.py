@@ -975,6 +975,9 @@ class ConversationalAgent:
         # Track processing time
         start_time = time.time()
 
+        # Log incoming query for system prompt improvement analysis
+        logger.info(f"USER_QUERY | user={user_id} | thread={thread_ts or 'none'} | query={message[:200]}")
+
         # Build system prompt with current date
         system = SYSTEM_PROMPT.format(current_date=date.today().isoformat())
 
@@ -1051,9 +1054,10 @@ class ConversationalAgent:
             # Calculate processing time
             processing_time_ms = int((time.time() - start_time) * 1000)
 
-            # Log tools used
-            if tools_used:
-                logger.info(f"Query processed using tools: {', '.join(tools_used)}")
+            # Log response for system prompt improvement analysis
+            tools_str = ','.join(tools_used) if tools_used else 'none'
+            response_preview = final_text[:100].replace('\n', ' ') if final_text else 'empty'
+            logger.info(f"BOT_RESPONSE | user={user_id} | tools={tools_str} | time_ms={processing_time_ms} | response_len={len(final_text)} | preview={response_preview}")
 
             # Save conversation for fine-tuning
             try:
