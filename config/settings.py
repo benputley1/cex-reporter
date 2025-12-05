@@ -115,9 +115,9 @@ class Settings:
     def kucoin_accounts(self) -> list[Dict[str, str]]:
         """Get all KuCoin account configurations"""
         accounts = []
-        account_names = ['MM1', 'MM2']
+        account_names = ['MM1', 'MM2', 'BT1']
 
-        # Check for multiple accounts (MM1, MM2)
+        # Check for multiple accounts (MM1, MM2, BT1)
         for account_name in account_names:
             key = os.getenv(f'KUCOIN_{account_name}_API_KEY', '')
             secret = os.getenv(f'KUCOIN_{account_name}_API_SECRET', '')
@@ -171,7 +171,7 @@ class Settings:
     def gateio_accounts(self) -> list[Dict[str, str]]:
         """Get all Gate.io account configurations"""
         accounts = []
-        account_names = ['MM1', 'MM2', 'TM']
+        account_names = ['MM1', 'MM2', 'TM', 'BT1']
 
         for account_name in account_names:
             key = os.getenv(f'GATEIO_{account_name}_API_KEY', '')
