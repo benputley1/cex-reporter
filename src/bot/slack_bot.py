@@ -80,7 +80,10 @@ class AlkimiBot:
         self.app_token = app_token or os.environ.get("SLACK_APP_TOKEN")
 
         # Initialize components
-        self.data_provider = DataProvider(sui_config=settings.sui_config)
+        self.data_provider = DataProvider(
+            db_path=settings.trade_cache_db,
+            sui_config=settings.sui_config
+        )
         self.router = QueryRouter()
         self.claude = ClaudeClient(
             api_key=anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")

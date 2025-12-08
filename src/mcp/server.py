@@ -34,7 +34,10 @@ def get_data_provider():
     if data_provider is None:
         from src.bot.data_provider import DataProvider
         from config.settings import settings
-        data_provider = DataProvider(sui_config=settings.sui_config)
+        data_provider = DataProvider(
+            db_path=settings.trade_cache_db,
+            sui_config=settings.sui_config
+        )
     return data_provider
 
 
