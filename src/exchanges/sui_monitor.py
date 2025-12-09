@@ -186,6 +186,23 @@ class SuiTokenMonitor(ExchangeInterface):
             f"wallets={len(self.wallet_addresses)}, graphql={self.graphql_url}"
         )
 
+    async def _ensure_client(self) -> bool:
+        """
+        Ensure HTTP client is initialized (lazy initialization).
+
+        This allows methods to work without requiring explicit initialize() call.
+
+        Returns:
+            True if client is ready
+        """
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=30.0,
+                headers={"Content-Type": "application/json"}
+            )
+            logger.debug("HTTP client lazily initialized")
+        return True
+
     def _parse_wallets_from_env(self) -> List[Dict[str, str]]:
         """Parse SUI_WALLET_* environment variables"""
         wallets = []
@@ -223,8 +240,7 @@ class SuiTokenMonitor(ExchangeInterface):
 
     async def _graphql_query(self, query: str, variables: Dict[str, Any]) -> Any:
         """Execute a GraphQL query against the Sui API"""
-        if not self._client:
-            raise ExchangeConnectionError("Client not initialized")
+        await self._ensure_client()
 
         payload = {
             "query": query,
@@ -242,8 +258,7 @@ class SuiTokenMonitor(ExchangeInterface):
 
     async def _rpc_call(self, method: str, params: List[Any]) -> Any:
         """Make an RPC call to Sui node (for balance queries)"""
-        if not self._client:
-            raise ExchangeConnectionError("Client not initialized")
+        await self._ensure_client()
 
         payload = {
             "jsonrpc": "2.0",
@@ -362,8 +377,7 @@ class SuiTokenMonitor(ExchangeInterface):
         Returns:
             List of Trade objects
         """
-        if not self._client:
-            return []
+        await self._ensure_client()
 
         trades = []
         try:
@@ -507,9 +521,11 @@ class SuiTokenMonitor(ExchangeInterface):
         if self.mock_mode:
             return self._generate_mock_pools()
 
-        if not self._client or not self.token_contract:
-            logger.warning("Client/token not configured, cannot fetch pools")
+        if not self.token_contract:
+            logger.warning("Token contract not configured, cannot fetch pools")
             return []
+
+        await self._ensure_client()
 
         pools = []
         try:
@@ -610,9 +626,11 @@ class SuiTokenMonitor(ExchangeInterface):
         if self.mock_mode:
             return self._generate_mock_holders(limit)
 
-        if not self._client or not self.token_contract:
-            logger.warning("Client/token not configured, cannot fetch holders")
+        if not self.token_contract:
+            logger.warning("Token contract not configured, cannot fetch holders")
             return []
+
+        await self._ensure_client()
 
         # GraphQL query to get coin objects with owner
         holders_query = """
@@ -711,8 +729,7 @@ class SuiTokenMonitor(ExchangeInterface):
         if self.mock_mode:
             return self._generate_mock_wallet_activity(address)
 
-        if not self._client:
-            return {"error": "Client not initialized"}
+        await self._ensure_client()
 
         wallet_tx_query = """
         query GetWalletTransactions($address: SuiAddress!) {
