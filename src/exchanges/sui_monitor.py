@@ -30,6 +30,9 @@ DEX_PACKAGES = {
     "0xefe8b36d5b2e43728cc323298626b83177803521d195cfb11e15b910e892fddf": "aftermath",
 }
 
+# Note: DEX swap event types are no longer used - we fetch trades from GeckoTerminal API
+# which is more reliable than querying Sui events (DEX package addresses change frequently)
+
 # Token decimals
 TOKEN_DECIMALS = {
     "alkimi": 9,
@@ -304,13 +307,10 @@ class SuiTokenMonitor(ExchangeInterface):
 
     async def get_trades(self, since: datetime) -> List[Trade]:
         """
-        Fetch all ALKIMI trades from any DEX since the specified timestamp.
+        Fetch all ALKIMI trades from DEX pools via GeckoTerminal API.
 
-        Uses GraphQL to:
-        1. Query ALKIMI coin objects
-        2. Get unique transaction digests from previousTransactionBlock
-        3. Fetch each transaction's balanceChanges
-        4. Identify swaps where ALKIMI is paired with SUI/USDC/USDT
+        Uses GeckoTerminal's trades endpoint which is more reliable than
+        querying Sui swap events directly (DEX package addresses change).
 
         Args:
             since: Fetch trades from this datetime onwards
@@ -321,29 +321,23 @@ class SuiTokenMonitor(ExchangeInterface):
         if self.mock_mode:
             return self._generate_mock_dex_trades(since)
 
-        if not self.token_contract:
-            logger.warning("No token contract configured, cannot fetch trades")
+        # Step 1: Get ALKIMI pools from GeckoTerminal
+        pools = await self.get_alkimi_pools()
+        if not pools:
+            logger.warning("No ALKIMI pools found, cannot fetch trades")
             return []
 
+        logger.info(f"Fetching trades from {len(pools)} ALKIMI pools")
+
         trades = []
-        since_ms = int(since.timestamp() * 1000)
 
-        try:
-            # Step 1: Get unique transaction digests from ALKIMI coin objects
-            tx_digests = await self._get_alkimi_transaction_digests()
-            logger.info(f"Found {len(tx_digests)} unique ALKIMI transactions to analyze")
-
-            # Step 2: Fetch transaction details and parse swaps
-            for digest in tx_digests:
-                try:
-                    trade = await self._get_trade_from_transaction(digest, since_ms)
-                    if trade:
-                        trades.append(trade)
-                except Exception as e:
-                    logger.debug(f"Error processing transaction {digest[:16]}...: {e}")
-
-        except Exception as e:
-            logger.error(f"Error fetching DEX trades: {e}")
+        # Step 2: Fetch trades from each pool via GeckoTerminal
+        for pool in pools:
+            try:
+                pool_trades = await self._fetch_pool_trades(pool.pool_id, pool.dex, since)
+                trades.extend(pool_trades)
+            except Exception as e:
+                logger.debug(f"Error fetching trades for pool {pool.pool_id[:16]}...: {e}")
 
         # Sort by timestamp (newest first)
         trades.sort(key=lambda t: t.timestamp, reverse=True)
@@ -351,173 +345,91 @@ class SuiTokenMonitor(ExchangeInterface):
         logger.info(f"Found {len(trades)} ALKIMI DEX trades since {since}")
         return trades
 
-    async def _get_alkimi_transaction_digests(self, max_coins: int = 200) -> Set[str]:
-        """
-        Query ALKIMI coin objects and collect unique transaction digests.
-
-        Each coin object tracks its last modification via previousTransactionBlock.
-        """
-        tx_digests: Set[str] = set()
-        cursor = None
-        coins_processed = 0
-
-        while coins_processed < max_coins:
-            try:
-                result = await self._graphql_query(
-                    self.COINS_QUERY,
-                    {"coinType": self.token_contract, "cursor": cursor}
-                )
-
-                coins_data = result.get('coins', {})
-                nodes = coins_data.get('nodes', [])
-
-                if not nodes:
-                    break
-
-                for node in nodes:
-                    prev_tx = node.get('previousTransactionBlock')
-                    if prev_tx and prev_tx.get('digest'):
-                        tx_digests.add(prev_tx['digest'])
-
-                coins_processed += len(nodes)
-
-                # Check pagination
-                page_info = coins_data.get('pageInfo', {})
-                if not page_info.get('hasNextPage'):
-                    break
-                cursor = page_info.get('endCursor')
-
-            except Exception as e:
-                logger.error(f"Error querying coin objects: {e}")
-                break
-
-        return tx_digests
-
-    async def _get_trade_from_transaction(
+    async def _fetch_pool_trades(
         self,
-        digest: str,
-        since_ms: int
-    ) -> Optional[Trade]:
+        pool_id: str,
+        dex_name: str,
+        since: datetime
+    ) -> List[Trade]:
         """
-        Fetch transaction details and parse as a trade if it's a swap.
+        Fetch trades for a specific pool from GeckoTerminal API.
 
-        A swap is identified by paired balance changes:
-        - ALKIMI amount change (positive = buy, negative = sell)
-        - SUI/USDC/USDT amount change (opposite sign)
+        Args:
+            pool_id: Pool address on Sui
+            dex_name: Name of the DEX (for trade metadata)
+            since: Only return trades after this timestamp
+
+        Returns:
+            List of Trade objects
         """
+        if not self._client:
+            return []
+
+        trades = []
         try:
-            result = await self._graphql_query(
-                self.TRANSACTION_QUERY,
-                {"digest": digest}
+            response = await self._client.get(
+                f"{GECKOTERMINAL_API}/networks/sui-network/pools/{pool_id}/trades"
             )
 
-            tx_block = result.get('transactionBlock')
-            if not tx_block:
-                return None
+            if response.status_code != 200:
+                return []
 
-            effects = tx_block.get('effects', {})
-            timestamp_str = effects.get('timestamp')
+            data = response.json()
 
-            if not timestamp_str:
-                return None
+            for trade_data in data.get("data", []):
+                attrs = trade_data.get("attributes", {})
 
-            # Parse timestamp (ISO format from GraphQL)
-            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-            timestamp_ms = int(timestamp.timestamp() * 1000)
+                # Parse timestamp
+                timestamp_str = attrs.get("block_timestamp", "")
+                if not timestamp_str:
+                    continue
 
-            # Skip if before 'since'
-            if timestamp_ms < since_ms:
-                return None
+                try:
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    # Convert to naive datetime for comparison
+                    timestamp = timestamp.replace(tzinfo=None)
+                except ValueError:
+                    continue
 
-            # Get balance changes
-            balance_changes = effects.get('balanceChanges', {}).get('nodes', [])
-            if not balance_changes:
-                return None
+                # Skip trades before 'since'
+                if timestamp < since:
+                    continue
 
-            # Parse swap from balance changes
-            return self._parse_swap_from_balance_changes(
-                balance_changes,
-                digest,
-                timestamp
-            )
+                # Determine trade side and amount
+                kind = attrs.get("kind", "").lower()
+                if kind == "buy":
+                    side = TradeSide.BUY
+                    amount = float(attrs.get("to_token_amount", 0))
+                elif kind == "sell":
+                    side = TradeSide.SELL
+                    amount = float(attrs.get("from_token_amount", 0))
+                else:
+                    continue
+
+                # Get price (ALKIMI price in USD)
+                if kind == "buy":
+                    price = float(attrs.get("price_to_in_usd", 0))
+                else:
+                    price = float(attrs.get("price_from_in_usd", 0))
+
+                # Create trade object
+                trade = Trade(
+                    timestamp=timestamp,
+                    symbol='ALKIMI',
+                    side=side,
+                    amount=amount,
+                    price=price,
+                    fee=0.0,  # GeckoTerminal doesn't provide fee info
+                    fee_currency='USD',
+                    trade_id=f"sui_{attrs.get('tx_hash', '')[:16]}",
+                    exchange=dex_name
+                )
+                trades.append(trade)
 
         except Exception as e:
-            logger.debug(f"Error fetching transaction {digest[:16]}...: {e}")
-            return None
+            logger.debug(f"Error parsing trades for pool {pool_id[:16]}...: {e}")
 
-    def _parse_swap_from_balance_changes(
-        self,
-        balance_changes: List[Dict],
-        tx_digest: str,
-        timestamp: datetime
-    ) -> Optional[Trade]:
-        """
-        Parse balance changes to identify an ALKIMI swap.
-
-        A swap is detected when we have:
-        - ALKIMI balance change (+ or -)
-        - Quote token balance change (SUI/USDC/USDT) with opposite sign
-
-        Returns Trade object if swap detected, None otherwise.
-        """
-        alkimi_change: Optional[int] = None
-        quote_change: Optional[tuple] = None  # (symbol, amount, decimals)
-
-        for bc in balance_changes:
-            coin_type = bc.get('coinType', {}).get('repr', '')
-            amount = int(bc.get('amount', 0))
-
-            coin_type_lower = coin_type.lower()
-
-            if 'alkimi' in coin_type_lower:
-                alkimi_change = amount
-            elif '::sui::SUI' in coin_type:
-                quote_change = ('SUI', amount, TOKEN_DECIMALS['sui'])
-            elif 'usdc' in coin_type_lower:
-                quote_change = ('USDC', amount, TOKEN_DECIMALS['usdc'])
-            elif 'usdt' in coin_type_lower:
-                quote_change = ('USDT', amount, TOKEN_DECIMALS['usdt'])
-
-        # Must have both ALKIMI and a quote token change
-        if alkimi_change is None or quote_change is None:
-            return None
-
-        # Amounts should have opposite signs for a swap
-        if (alkimi_change > 0 and quote_change[1] > 0) or \
-           (alkimi_change < 0 and quote_change[1] < 0):
-            return None
-
-        # Determine trade side
-        side = TradeSide.BUY if alkimi_change > 0 else TradeSide.SELL
-
-        # Calculate amounts with proper decimals
-        alkimi_amount = abs(alkimi_change) / (10 ** TOKEN_DECIMALS['alkimi'])
-        quote_amount = abs(quote_change[1]) / (10 ** quote_change[2])
-
-        # Calculate price in quote token per ALKIMI
-        price = quote_amount / alkimi_amount if alkimi_amount > 0 else 0
-
-        # Identify DEX from transaction (simplified - could analyze transaction inputs)
-        exchange = "sui_dex"
-
-        trade = Trade(
-            timestamp=timestamp.replace(tzinfo=None),  # Remove timezone for consistency
-            symbol='ALKIMI',
-            side=side,
-            amount=alkimi_amount,
-            price=price,
-            fee=0.0,  # DEX fees are included in swap amounts
-            fee_currency=quote_change[0],
-            trade_id=f"sui_{tx_digest[:16]}",
-            exchange=exchange
-        )
-
-        logger.debug(
-            f"Parsed swap: {side.value} {alkimi_amount:.2f} ALKIMI @ "
-            f"{price:.8f} {quote_change[0]}"
-        )
-
-        return trade
+        return trades
 
     async def get_deposits(self, since: datetime) -> List:
         """DEX doesn't have deposits in the traditional sense"""
@@ -647,6 +559,40 @@ class SuiTokenMonitor(ExchangeInterface):
         import re
         match = re.search(r'(\d+\.?\d*%)', pool_name)
         return match.group(1) if match else "N/A"
+
+    async def get_total_tvl(self) -> Dict[str, Any]:
+        """
+        Get total TVL across all ALKIMI pools with breakdown by DEX.
+
+        Returns:
+            Dict with total_tvl_usd, total_volume_24h, pool_count, and by_dex breakdown
+        """
+        pools = await self.get_alkimi_pools()
+
+        if not pools:
+            return {
+                'total_tvl_usd': 0.0,
+                'total_volume_24h': 0.0,
+                'pool_count': 0,
+                'by_dex': {}
+            }
+
+        # Calculate totals
+        total_tvl = sum(p.tvl_usd for p in pools)
+        total_volume = sum(p.volume_24h for p in pools)
+
+        # Group by DEX
+        dex_tvl: Dict[str, float] = {}
+        for pool in pools:
+            dex_name = pool.dex
+            dex_tvl[dex_name] = dex_tvl.get(dex_name, 0) + pool.tvl_usd
+
+        return {
+            'total_tvl_usd': total_tvl,
+            'total_volume_24h': total_volume,
+            'pool_count': len(pools),
+            'by_dex': dex_tvl
+        }
 
     async def get_top_holders(self, limit: int = 10, max_pages: int = 20) -> List[HolderInfo]:
         """
