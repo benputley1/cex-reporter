@@ -104,10 +104,39 @@ class TradeCache:
 
             # Create unique composite index on (exchange, trade_id, timestamp)
             # This is the primary deduplication key
-            conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_trade
-                ON trades(exchange, trade_id, timestamp)
-            """)
+            try:
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_trade
+                    ON trades(exchange, trade_id, timestamp)
+                """)
+            except sqlite3.IntegrityError:
+                # Duplicates exist in database - need to deduplicate before creating index
+                logger.warning("Duplicate trades found in database, deduplicating...")
+
+                # Count duplicates before removal
+                cursor = conn.execute("""
+                    SELECT COUNT(*) - COUNT(DISTINCT exchange || trade_id || timestamp)
+                    FROM trades
+                """)
+                dup_count = cursor.fetchone()[0]
+
+                # Keep only the first occurrence of each unique trade (by rowid)
+                conn.execute("""
+                    DELETE FROM trades
+                    WHERE rowid NOT IN (
+                        SELECT MIN(rowid)
+                        FROM trades
+                        GROUP BY exchange, trade_id, timestamp
+                    )
+                """)
+
+                logger.info(f"Removed {dup_count} duplicate trades from database")
+
+                # Now create the unique index
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_trade
+                    ON trades(exchange, trade_id, timestamp)
+                """)
 
             # Create index for faster queries
             conn.execute("""
