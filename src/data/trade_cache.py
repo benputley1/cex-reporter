@@ -149,13 +149,8 @@ class TradeCache:
                 ON trades(exchange, account_name)
             """)
 
-            # Create index for transaction_type filtering
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_transaction_type
-                ON trades(transaction_type)
-            """)
-
             # Migrate existing data: add transaction_type column if it doesn't exist
+            # MUST happen before creating index on transaction_type
             cursor = conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in cursor.fetchall()]
 
@@ -165,6 +160,12 @@ class TradeCache:
                 conn.execute("UPDATE trades SET transaction_type = 'trade' WHERE transaction_type IS NULL")
                 conn.commit()
                 logger.info("Database migration completed: all existing records set to 'trade'")
+
+            # Create index for transaction_type filtering (after migration)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_transaction_type
+                ON trades(transaction_type)
+            """)
 
             conn.commit()
             logger.debug(f"Trade cache database initialized at {self.db_path}")
