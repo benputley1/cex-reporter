@@ -1,4 +1,4 @@
-# Sui DEX Integration Plan
+cre# Sui DEX Integration Plan
 
 ## Executive Summary
 This document outlines the plan to integrate Sui blockchain DEX trades into the existing CEX Reporter system, enabling consolidated reporting across both centralized exchanges (CEXs) and decentralized exchanges (DEXs) on Sui network.
@@ -59,7 +59,8 @@ This document outlines the plan to integrate Sui blockchain DEX trades into the 
 **Option C: Blockchain Data Aggregators**
 - Pros: Normalized data across DEXs, easier integration
 - Cons: Third-party dependency, potential costs
-- Examples: CoinGecko API, Birdeye API, DefiLlama
+- Examples: Coin
+Gecko API, Birdeye API, DefiLlama
 
 ## 3. Technical Architecture
 

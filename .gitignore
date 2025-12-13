@@ -61,6 +61,20 @@ agent_logs/
 *.bak
 *.backup
 
+# Temporary implementation reports
+*_IMPLEMENTATION.md
+*_IMPLEMENTATION_REPORT.md
+*_SUMMARY.md
+*_REPORT.md
+TEAM*_*.md
+TEAM*_*.txt
+*_MIGRATION*.md
+*_MIGRATION*.txt
+
+# Temporary test files (root level)
+/test_*.py
+/migrate_*.py
+
 # Exchange data (may contain sensitive reports)
 Exchange Data/
 "Exchange Data /"
