@@ -3,11 +3,15 @@ Data Provider Module
 
 Unified data access layer for the ALKIMI Slack bot.
 Consolidates access to trade cache, snapshots, DEX data, and market prices.
+
+This class now acts as a facade for various repository classes,
+providing backward compatibility while delegating to focused repositories.
 """
 
 import os
 import json
 import sqlite3
+import aiosqlite
 import pandas as pd
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -18,6 +22,16 @@ from src.data.daily_snapshot import DailySnapshot
 from src.data.coingecko_client import CoinGeckoClient
 from src.exchanges.sui_monitor import SuiTokenMonitor
 from src.exchanges.base import Trade, TradeSide
+from src.monitoring.health import HealthChecker, SystemHealth
+from src.repositories import (
+    TradeRepository,
+    BalanceRepository,
+    SnapshotRepository,
+    QueryRepository,
+    ThreadRepository,
+    PriceRepository,
+    OTCRepository
+)
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -52,7 +66,7 @@ class DataProvider:
         self.db_path = Path(db_path)
         self.snapshots_dir = Path(snapshots_dir)
 
-        # Initialize components
+        # Initialize core components (kept for backward compatibility)
         self.trade_cache = TradeCache(str(self.db_path))
         self.snapshot_manager = DailySnapshot(str(self.snapshots_dir))
         self.coingecko = CoinGeckoClient()
@@ -61,6 +75,22 @@ class DataProvider:
         self.sui_monitor: Optional[SuiTokenMonitor] = None
         if sui_config:
             self.sui_monitor = SuiTokenMonitor(config=sui_config)
+
+        # Initialize health checker
+        self.health_checker: Optional[HealthChecker] = None
+
+        # Initialize repositories
+        self.trades = TradeRepository(self.trade_cache)
+        self.balances = BalanceRepository(self.snapshot_manager)
+        self.snapshots = SnapshotRepository(self.snapshot_manager)
+        self.queries = QueryRepository(self.db_path)
+        self.threads = ThreadRepository(self.db_path)
+        self.prices = PriceRepository(self.coingecko)
+        self.otc = OTCRepository(self.db_path)
+
+        # Keep price_history for backward compatibility (delegated to PriceRepository)
+        self.price_history = self.prices.price_history
+        self.max_price_history = self.prices.max_price_history
 
         # Ensure database migrations are applied
         self._apply_migrations()
@@ -71,7 +101,7 @@ class DataProvider:
         )
 
     def _apply_migrations(self) -> None:
-        """Apply database migrations for new tables."""
+        """Apply database migrations for new tables (synchronous for __init__)."""
         with sqlite3.connect(self.db_path) as conn:
             # Query history table
             conn.execute("""
@@ -214,39 +244,12 @@ class DataProvider:
             DataFrame with columns: timestamp, exchange, account_name, symbol,
                                    side, amount, price, fee, fee_currency, trade_id
         """
-        trades = self.trade_cache.get_trades(
+        return await self.trades.get_trades_df(
             since=since,
             until=until,
             exchange=exchange,
-            account_name=account
+            account=account
         )
-
-        if not trades:
-            # Return empty DataFrame with expected schema
-            return pd.DataFrame(columns=[
-                'timestamp', 'exchange', 'account_name', 'symbol',
-                'side', 'amount', 'price', 'fee', 'fee_currency', 'trade_id'
-            ])
-
-        # Convert Trade objects to DataFrame
-        data = []
-        for trade in trades:
-            data.append({
-                'timestamp': trade.timestamp,
-                'exchange': trade.exchange,
-                'account_name': 'MAIN',  # Default if not in trade object
-                'symbol': trade.symbol,
-                'side': trade.side.value,
-                'amount': trade.amount,
-                'price': trade.price,
-                'fee': trade.fee,
-                'fee_currency': trade.fee_currency,
-                'trade_id': trade.trade_id
-            })
-
-        df = pd.DataFrame(data)
-        logger.debug(f"Retrieved {len(df)} trades as DataFrame")
-        return df
 
     async def get_balances(self) -> Dict[str, Dict[str, float]]:
         """
@@ -256,40 +259,7 @@ class DataProvider:
             Nested dict: {exchange_account: {asset: balance}}
             Example: {'mexc_mm1': {'USDT': 1000.0, 'ALKIMI': 50000.0}}
         """
-        latest_snapshot = self.snapshot_manager.load_snapshot(date.today())
-
-        if not latest_snapshot:
-            # Try yesterday's snapshot
-            logger.warning("No snapshot for today, trying yesterday")
-            latest_snapshot = self.snapshot_manager.get_yesterday_snapshot()
-
-        if not latest_snapshot:
-            logger.warning("No recent snapshots found")
-            return {}
-
-        # Parse snapshot structure
-        # Assuming snapshot format: {asset: balance} or {exchange_asset: balance}
-        balances = {}
-
-        for key, value in latest_snapshot.items():
-            if '_' in key:
-                # Format: exchange_account_asset or exchange_asset
-                parts = key.split('_')
-                if len(parts) >= 2:
-                    account_key = '_'.join(parts[:-1])  # Everything except last part
-                    asset = parts[-1]  # Last part is asset
-
-                    if account_key not in balances:
-                        balances[account_key] = {}
-                    balances[account_key][asset] = float(value)
-            else:
-                # Simple asset: balance format
-                if 'total' not in balances:
-                    balances['total'] = {}
-                balances['total'][key] = float(value)
-
-        logger.debug(f"Retrieved balances for {len(balances)} accounts")
-        return balances
+        return await self.balances.get_balances()
 
     async def get_snapshots(self, days: int = 30) -> List[Dict]:
         """
@@ -301,24 +271,7 @@ class DataProvider:
         Returns:
             List of snapshot dicts with 'date', 'timestamp', and 'balances'
         """
-        snapshots = []
-        current_date = date.today()
-
-        for i in range(days):
-            snapshot_date = current_date - timedelta(days=i)
-            snapshot_data = self.snapshot_manager.load_snapshot(snapshot_date)
-
-            if snapshot_data:
-                snapshots.append({
-                    'date': snapshot_date.isoformat(),
-                    'timestamp': datetime.combine(snapshot_date, datetime.min.time()).isoformat(),
-                    'balances': snapshot_data
-                })
-
-        # Reverse to get chronological order (oldest first)
-        snapshots.reverse()
-        logger.debug(f"Retrieved {len(snapshots)} snapshots from last {days} days")
-        return snapshots
+        return await self.snapshots.get_snapshots(days=days)
 
     async def get_dex_trades(
         self,
@@ -385,14 +338,28 @@ class DataProvider:
         Returns:
             Current price in USD, or None if fetch fails
         """
-        try:
-            price = await self.coingecko.get_current_price()
-            if price:
-                logger.debug(f"Current ALKIMI price: ${price:.6f}")
-            return price
-        except Exception as e:
-            logger.error(f"Error fetching current price: {e}")
-            return None
+        return await self.prices.get_current_price()
+
+    def record_price(self, price: float) -> None:
+        """
+        Record price for change detection.
+
+        Args:
+            price: Current price to record
+        """
+        self.prices.record_price(price)
+
+    def get_price_change(self, minutes: int = 60) -> Optional[float]:
+        """
+        Get price change percentage over last N minutes.
+
+        Args:
+            minutes: Time window in minutes (default: 60)
+
+        Returns:
+            Price change percentage, or None if insufficient data
+        """
+        return self.prices.get_price_change(minutes=minutes)
 
     async def get_trade_summary(
         self,
@@ -416,72 +383,7 @@ class DataProvider:
                 - by_account: Breakdown by account
                 - avg_price: Average trade price
         """
-        df = await self.get_trades_df(since=since, until=until)
-
-        if df.empty:
-            return {
-                'total_volume': 0,
-                'trade_count': 0,
-                'buy_volume': 0,
-                'sell_volume': 0,
-                'by_exchange': {},
-                'by_account': {},
-                'avg_price': 0
-            }
-
-        # Calculate volume (amount * price)
-        df['volume'] = df['amount'] * df['price']
-
-        # Split by side
-        buys = df[df['side'] == 'buy']
-        sells = df[df['side'] == 'sell']
-
-        # By exchange breakdown
-        by_exchange = {}
-        for exchange in df['exchange'].unique():
-            exchange_df = df[df['exchange'] == exchange]
-            by_exchange[exchange] = {
-                'trade_count': len(exchange_df),
-                'volume': float(exchange_df['volume'].sum()),
-                'buy_count': len(exchange_df[exchange_df['side'] == 'buy']),
-                'sell_count': len(exchange_df[exchange_df['side'] == 'sell'])
-            }
-
-        # By account breakdown
-        by_account = {}
-        for account in df['account_name'].unique():
-            account_df = df[df['account_name'] == account]
-            by_account[account] = {
-                'trade_count': len(account_df),
-                'volume': float(account_df['volume'].sum()),
-                'buy_count': len(account_df[account_df['side'] == 'buy']),
-                'sell_count': len(account_df[account_df['side'] == 'sell'])
-            }
-
-        summary = {
-            'total_volume': float(df['volume'].sum()),
-            'trade_count': len(df),
-            'buy_volume': float(buys['volume'].sum()) if not buys.empty else 0,
-            'sell_volume': float(sells['volume'].sum()) if not sells.empty else 0,
-            'buy_count': len(buys),
-            'sell_count': len(sells),
-            'by_exchange': by_exchange,
-            'by_account': by_account,
-            'avg_price': float(df['price'].mean()),
-            'min_price': float(df['price'].min()),
-            'max_price': float(df['price'].max()),
-            'total_fees': float(df['fee'].sum()),
-            'date_range': {
-                'start': df['timestamp'].min().isoformat() if not df.empty else None,
-                'end': df['timestamp'].max().isoformat() if not df.empty else None
-            }
-        }
-
-        logger.info(
-            f"Trade summary: {summary['trade_count']} trades, "
-            f"${summary['total_volume']:.2f} volume"
-        )
-        return summary
+        return await self.trades.get_trade_summary(since=since, until=until)
 
     # =========================================================================
     # Additional utility methods
@@ -494,11 +396,7 @@ class DataProvider:
         Returns:
             Dict with price, volume, market cap, and 24h change
         """
-        try:
-            return await self.coingecko.get_market_data()
-        except Exception as e:
-            logger.error(f"Error fetching market data: {e}")
-            return None
+        return await self.prices.get_market_data()
 
     async def save_query_history(
         self,
@@ -519,20 +417,18 @@ class DataProvider:
         Returns:
             ID of the saved query record
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                INSERT INTO query_history (
-                    user_id, user_name, channel_id, query_text, query_type,
-                    generated_code, result_summary, execution_time_ms,
-                    success, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                user_id, user_name, channel_id, query_text, query_type,
-                generated_code, result_summary, execution_time_ms,
-                success, error_message
-            ))
-            conn.commit()
-            return cursor.lastrowid
+        return await self.queries.save_query_history(
+            user_id=user_id,
+            query_text=query_text,
+            query_type=query_type,
+            user_name=user_name,
+            channel_id=channel_id,
+            generated_code=generated_code,
+            result_summary=result_summary,
+            execution_time_ms=execution_time_ms,
+            success=success,
+            error_message=error_message
+        )
 
     async def get_query_history(
         self,
@@ -549,28 +445,9 @@ class DataProvider:
         Returns:
             List of query history records
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        return await self.queries.get_query_history(user_id=user_id, limit=limit)
 
-            if user_id:
-                query = """
-                    SELECT * FROM query_history
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                """
-                cursor = conn.execute(query, (user_id, limit))
-            else:
-                query = """
-                    SELECT * FROM query_history
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                """
-                cursor = conn.execute(query, (limit,))
-
-            return [dict(row) for row in cursor.fetchall()]
-
-    def save_conversation_log(
+    async def save_conversation_log(
         self,
         thread_ts: str,
         user_id: str,
@@ -595,23 +472,17 @@ class DataProvider:
         Returns:
             ID of the saved conversation record
         """
-        tools_json = json.dumps(tools_used) if tools_used else None
+        return await self.queries.save_conversation_log(
+            thread_ts=thread_ts,
+            user_id=user_id,
+            user_message=user_message,
+            assistant_response=assistant_response,
+            tools_used=tools_used,
+            model=model,
+            processing_time_ms=processing_time_ms
+        )
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                INSERT INTO conversation_logs (
-                    thread_ts, user_id, user_message, assistant_response,
-                    tools_used, model, processing_time_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                thread_ts, user_id, user_message, assistant_response,
-                tools_json, model, processing_time_ms
-            ))
-            conn.commit()
-            logger.debug(f"Saved conversation log for user {user_id}")
-            return cursor.lastrowid
-
-    def add_active_thread(self, thread_ts: str, channel_id: str) -> None:
+    async def add_active_thread(self, thread_ts: str, channel_id: str) -> None:
         """
         Track a thread the bot is participating in.
 
@@ -619,15 +490,9 @@ class DataProvider:
             thread_ts: Slack thread timestamp (primary identifier)
             channel_id: Channel ID where the thread is located
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO active_threads (thread_ts, channel_id) VALUES (?, ?)",
-                (thread_ts, channel_id)
-            )
-            conn.commit()
-        logger.debug(f"Added active thread: {thread_ts} in channel {channel_id}")
+        await self.threads.add_active_thread(thread_ts, channel_id)
 
-    def is_active_thread(self, thread_ts: str) -> bool:
+    async def is_active_thread(self, thread_ts: str) -> bool:
         """
         Check if bot is participating in this thread.
 
@@ -637,29 +502,20 @@ class DataProvider:
         Returns:
             True if the bot is tracking this thread
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT 1 FROM active_threads WHERE thread_ts = ?",
-                (thread_ts,)
-            )
-            return cursor.fetchone() is not None
+        return await self.threads.is_active_thread(thread_ts)
 
     def load_active_threads(self) -> Set[str]:
         """
-        Load all active thread IDs (for startup).
+        Load all active thread IDs (for startup) - synchronous version.
 
         Returns:
             Set of thread_ts values the bot is participating in
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT thread_ts FROM active_threads")
-            threads = {row[0] for row in cursor.fetchall()}
-        logger.info(f"Loaded {len(threads)} active threads from database")
-        return threads
+        return self.threads.load_active_threads_sync()
 
     def cleanup_old_threads(self, days: int = 30) -> int:
         """
-        Remove threads older than specified days to prevent unbounded growth.
+        Remove threads older than specified days - synchronous version.
 
         Args:
             days: Remove threads older than this many days
@@ -667,16 +523,20 @@ class DataProvider:
         Returns:
             Number of threads removed
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "DELETE FROM active_threads WHERE created_at < datetime('now', ?)",
-                (f'-{days} days',)
-            )
-            conn.commit()
-            removed = cursor.rowcount
-        if removed > 0:
-            logger.info(f"Cleaned up {removed} threads older than {days} days")
-        return removed
+        return self.threads.cleanup_old_threads_sync(days=days)
+
+    async def get_stale_threads(self, days: int = 7) -> List[str]:
+        """
+        Get list of thread IDs that are older than specified days.
+        Used for periodic cleanup without deleting from database.
+
+        Args:
+            days: Get threads older than this many days
+
+        Returns:
+            List of thread_ts values that are stale
+        """
+        return await self.threads.get_stale_threads(days=days)
 
     async def save_function(
         self,
@@ -697,18 +557,12 @@ class DataProvider:
         Returns:
             True if saved successfully, False if name already exists
         """
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO saved_functions (name, description, code, created_by)
-                    VALUES (?, ?, ?, ?)
-                """, (name, description, code, created_by))
-                conn.commit()
-                logger.info(f"Saved function '{name}' by {created_by}")
-                return True
-        except sqlite3.IntegrityError:
-            logger.warning(f"Function '{name}' already exists")
-            return False
+        return await self.queries.save_function(
+            name=name,
+            code=code,
+            created_by=created_by,
+            description=description
+        )
 
     async def get_function(self, name: str) -> Optional[Dict[str, Any]]:
         """
@@ -717,26 +571,7 @@ class DataProvider:
         Returns:
             Function dict or None if not found
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM saved_functions WHERE name = ?",
-                (name,)
-            )
-            row = cursor.fetchone()
-
-            if row:
-                # Update usage stats
-                conn.execute("""
-                    UPDATE saved_functions
-                    SET last_used = CURRENT_TIMESTAMP,
-                        use_count = use_count + 1
-                    WHERE name = ?
-                """, (name,))
-                conn.commit()
-
-                return dict(row)
-            return None
+        return await self.queries.get_function(name)
 
     async def list_functions(self) -> List[Dict[str, Any]]:
         """
@@ -745,14 +580,7 @@ class DataProvider:
         Returns:
             List of function metadata (without code)
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT name, description, created_by, created_at, last_used, use_count
-                FROM saved_functions
-                ORDER BY use_count DESC, name ASC
-            """)
-            return [dict(row) for row in cursor.fetchall()]
+        return await self.queries.list_functions()
 
     async def save_otc_transaction(
         self,
@@ -781,19 +609,16 @@ class DataProvider:
         Returns:
             ID of the saved transaction
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                INSERT INTO otc_transactions (
-                    date, counterparty, alkimi_amount, usd_amount,
-                    price, side, notes, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                date_str, counterparty, alkimi_amount, usd_amount,
-                price, side, notes, created_by
-            ))
-            conn.commit()
-            logger.info(f"Saved OTC transaction: {side} {alkimi_amount} ALKIMI @ ${price}")
-            return cursor.lastrowid
+        return await self.otc.save_otc_transaction(
+            date_str=date_str,
+            alkimi_amount=alkimi_amount,
+            usd_amount=usd_amount,
+            price=price,
+            side=side,
+            counterparty=counterparty,
+            notes=notes,
+            created_by=created_by
+        )
 
     async def get_otc_transactions(
         self,
@@ -810,28 +635,84 @@ class DataProvider:
         Returns:
             DataFrame with OTC transaction data
         """
-        query = "SELECT * FROM otc_transactions WHERE 1=1"
-        params = []
+        return await self.otc.get_otc_transactions(since=since, until=until)
 
-        if since:
-            query += " AND date >= ?"
-            params.append(since)
+    async def health_check(
+        self,
+        exchange_clients: Optional[Dict[str, Any]] = None,
+        use_cache: bool = True
+    ) -> SystemHealth:
+        """
+        Perform comprehensive health check on all system components.
 
-        if until:
-            query += " AND date <= ?"
-            params.append(until)
+        This method checks:
+        - Database connectivity and performance
+        - Exchange API connectivity (if exchange_clients provided)
+        - CoinGecko API connectivity
+        - Sui blockchain monitor (if configured)
 
-        query += " ORDER BY date DESC"
+        Args:
+            exchange_clients: Optional dictionary mapping exchange names to client instances
+            use_cache: Whether to use cached health check results (default: True)
 
-        with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(query, conn, params=params)
+        Returns:
+            SystemHealth object with overall status and component details
 
-        logger.debug(f"Retrieved {len(df)} OTC transactions")
-        return df
+        Example:
+            ```python
+            # Basic health check (database + APIs only)
+            health = await data_provider.health_check()
+            print(f"System status: {health.overall_status.value}")
+
+            # Full health check including exchanges
+            exchange_clients = {
+                'mexc_mm1': mexc_client1,
+                'mexc_mm2': mexc_client2,
+                'kucoin_mm1': kucoin_client
+            }
+            health = await data_provider.health_check(exchange_clients)
+            for component in health.components:
+                print(f"{component.name}: {component.status.value} ({component.latency_ms}ms)")
+            ```
+        """
+        # Lazy initialize health checker
+        if not self.health_checker:
+            self.health_checker = HealthChecker(self)
+            logger.debug("Health checker initialized")
+
+        # Perform system health check
+        system_health = await self.health_checker.get_system_health(
+            exchange_clients=exchange_clients,
+            use_cache=use_cache
+        )
+
+        return system_health
+
+    def format_health_for_slack(self, system_health: SystemHealth) -> str:
+        """
+        Format system health status for Slack message.
+
+        Args:
+            system_health: SystemHealth object from health_check()
+
+        Returns:
+            Formatted string suitable for Slack messages
+
+        Example:
+            ```python
+            health = await data_provider.health_check()
+            slack_message = data_provider.format_health_for_slack(health)
+            # Post slack_message to Slack channel
+            ```
+        """
+        if not self.health_checker:
+            self.health_checker = HealthChecker(self)
+
+        return self.health_checker.format_health_for_slack(system_health)
 
     async def close(self) -> None:
         """Close all connections and cleanup resources."""
-        await self.coingecko.close()
+        await self.prices.close()
 
         if self.sui_monitor:
             await self.sui_monitor.close()

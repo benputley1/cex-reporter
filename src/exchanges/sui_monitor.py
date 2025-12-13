@@ -15,6 +15,7 @@ import httpx
 
 from src.exchanges.base import Trade, TradeSide, ExchangeInterface, ExchangeConnectionError
 from src.utils import get_logger
+from src.utils.retry import retry_with_backoff
 
 logger = get_logger(__name__)
 
@@ -276,6 +277,7 @@ class SuiTokenMonitor(ExchangeInterface):
 
         return data.get("result")
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     async def get_balances(self) -> Dict[str, float]:
         """
         Get ALKIMI balances across all monitored wallets.
@@ -320,6 +322,7 @@ class SuiTokenMonitor(ExchangeInterface):
             logger.error(f"Error getting balance for {address}: {e}")
             return 0.0
 
+    @retry_with_backoff(max_retries=3, initial_delay=2.0)
     async def get_trades(self, since: datetime) -> List[Trade]:
         """
         Fetch all ALKIMI trades from DEX pools via GeckoTerminal API.
@@ -453,6 +456,7 @@ class SuiTokenMonitor(ExchangeInterface):
         """DEX doesn't have withdrawals in the traditional sense"""
         return []
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     async def get_prices(self, symbols: List[str]) -> Dict[str, float]:
         """
         Get current prices from DEX pools.
@@ -512,6 +516,7 @@ class SuiTokenMonitor(ExchangeInterface):
     # ON-CHAIN ANALYTICS: Pools, Holders, Wallet Tracking
     # =========================================================================
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     async def get_alkimi_pools(self) -> List[PoolInfo]:
         """
         Get all ALKIMI liquidity pools across DEXs via GeckoTerminal API.
@@ -610,6 +615,7 @@ class SuiTokenMonitor(ExchangeInterface):
             'by_dex': dex_tvl
         }
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     async def get_top_holders(self, limit: int = 10, max_pages: int = 20) -> List[HolderInfo]:
         """
         Get top ALKIMI token holders by balance.

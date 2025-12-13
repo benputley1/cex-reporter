@@ -70,14 +70,31 @@ async def check_all_balances(post_to_slack: bool = False):
         await client.initialize()
         exchanges.append(client)
 
-    # Fetch balances
+    # Fetch balances in parallel
+    import time
+    print(f"Fetching balances from {len(exchanges)} exchanges in parallel...")
+    start_time = time.time()
+
+    timeout = settings.exchange_timeout_seconds
+    tasks = [asyncio.wait_for(exchange.get_balances(), timeout=timeout) for exchange in exchanges]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    elapsed_time = time.time() - start_time
+    print(f"Completed in {elapsed_time:.2f}s\n")
+
     total_usdt = 0
     total_alkimi = 0
     exchange_balances = []
 
-    for exchange in exchanges:
+    for exchange, result in zip(exchanges, results):
         try:
-            balances = await exchange.get_balances()
+            if isinstance(result, Exception):
+                print(f"✗ {exchange.exchange_name:10} / {exchange.account_name:<6}")
+                print(f"    Error: {result}")
+                print()
+                continue
+
+            balances = result
 
             usdt = balances.get('USDT', {}).get('total', 0)
             alkimi = balances.get('ALKIMI', {}).get('total', 0)

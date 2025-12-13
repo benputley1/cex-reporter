@@ -6,6 +6,7 @@ Supports both CEX and DEX (Sui blockchain) data sources.
 Much simpler than the full position_tracker - focused on daily reporting.
 """
 
+import asyncio
 from typing import Dict, List
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -133,6 +134,9 @@ class SimpleTracker:
         """
         Get current balances aggregated by exchange with detailed breakdown.
 
+        Uses parallel execution with asyncio.gather to fetch from all exchanges concurrently.
+        Handles partial failures gracefully - returns results from successful exchanges.
+
         Returns:
             (total_balances, holdings_by_exchange)
 
@@ -145,8 +149,23 @@ class SimpleTracker:
                 }
             }
         """
-        logger.info("Fetching current balances...")
+        logger.info(f"Fetching current balances from {len(exchanges)} exchanges in parallel...")
+        start_time = datetime.now()
 
+        # Create tasks with timeout for each exchange
+        timeout = settings.exchange_timeout_seconds
+        tasks = []
+        for exchange in exchanges:
+            task = asyncio.wait_for(
+                exchange.get_balances(),
+                timeout=timeout
+            )
+            tasks.append(task)
+
+        # Execute all tasks in parallel with exception handling
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results and aggregate
         holdings_by_exchange = defaultdict(lambda: {
             'accounts': [],
             'USDT': {'free': 0.0, 'locked': 0.0, 'total': 0.0},
@@ -154,12 +173,25 @@ class SimpleTracker:
         })
         total_balances = {'USDT': 0.0, 'ALKIMI': 0.0}
 
-        for exchange in exchanges:
-            try:
-                balances = await exchange.get_balances()
+        successful_count = 0
+        failed_exchanges = []
 
-                exchange_name = exchange.exchange_name.upper()
-                account_name = exchange.account_name
+        for exchange, result in zip(exchanges, results):
+            exchange_name = exchange.exchange_name.upper()
+            account_name = exchange.account_name
+
+            # Handle failures gracefully
+            if isinstance(result, Exception):
+                failed_exchanges.append(f"{exchange_name}/{account_name}")
+                logger.warning(
+                    f"Failed to fetch balances from {exchange_name}/{account_name}: {result}"
+                )
+                continue
+
+            # Process successful result
+            try:
+                balances = result
+                successful_count += 1
 
                 # Add to exchange total (with detailed breakdown)
                 holdings_by_exchange[exchange_name]['accounts'].append(account_name)
@@ -180,10 +212,21 @@ class SimpleTracker:
                 )
 
             except Exception as e:
-                logger.error(f"Failed to fetch balances from {exchange.account_name}: {e}")
+                failed_exchanges.append(f"{exchange_name}/{account_name}")
+                logger.error(f"Error processing balances from {exchange_name}/{account_name}: {e}")
 
         # Convert to regular dict
         holdings_by_exchange = dict(holdings_by_exchange)
+
+        # Log timing and success rate
+        elapsed_time = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Parallel balance fetch completed in {elapsed_time:.2f}s "
+            f"({successful_count}/{len(exchanges)} successful)"
+        )
+
+        if failed_exchanges:
+            logger.warning(f"Failed exchanges: {', '.join(failed_exchanges)}")
 
         logger.info(
             f"Total balances: USDT=${total_balances['USDT']:,.2f}, "
@@ -233,6 +276,9 @@ class SimpleTracker:
         Fetch trades from APIs and cache them locally.
         Returns trades and the complete data window start date.
 
+        Uses parallel execution with asyncio.gather to fetch from all exchanges concurrently.
+        Handles partial failures gracefully - returns results from successful exchanges.
+
         The complete data window is limited by the exchange with the shortest
         API retention (MEXC: 25 days). This ensures we only use data where we
         have complete coverage across all exchanges.
@@ -240,23 +286,53 @@ class SimpleTracker:
         Returns:
             (all_trades, complete_window_start): Trades and the start date of complete data
         """
-        logger.info("Fetching trades from exchanges and updating cache...")
+        logger.info(f"Fetching trades from {len(exchanges)} exchanges in parallel...")
+        start_time = datetime.now()
 
         # Fetch from APIs (last 30 days to ensure we get everything available)
         api_start = datetime.now() - timedelta(days=30)
 
+        # Create tasks with timeout for each exchange
+        timeout = settings.exchange_timeout_seconds
+        tasks = []
+        for exchange in exchanges:
+            task = asyncio.wait_for(
+                exchange.get_trades(since=api_start),
+                timeout=timeout
+            )
+            tasks.append(task)
+
+        # Execute all tasks in parallel with exception handling
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results
         all_api_trades = []
         oldest_trade_per_exchange = {}  # Track oldest trade from each exchange
+        successful_count = 0
+        failed_exchanges = []
 
-        for exchange in exchanges:
+        for exchange, result in zip(exchanges, results):
+            exchange_name = exchange.exchange_name
+            account_name = exchange.account_name
+
+            # Handle failures gracefully
+            if isinstance(result, Exception):
+                failed_exchanges.append(f"{exchange_name}/{account_name}")
+                logger.warning(
+                    f"Failed to fetch trades from {exchange_name}/{account_name}: {result}"
+                )
+                continue
+
+            # Process successful result
             try:
-                trades = await exchange.get_trades(since=api_start)
+                trades = result
+                successful_count += 1
 
                 # Save to cache
                 cached_count = self.trade_cache.save_trades(
                     trades,
-                    exchange.exchange_name,
-                    exchange.account_name
+                    exchange_name,
+                    account_name
                 )
 
                 all_api_trades.extend(trades)
@@ -264,21 +340,32 @@ class SimpleTracker:
                 # Track oldest trade for this exchange
                 if trades:
                     oldest_trade = min(trades, key=lambda t: t.timestamp)
-                    if exchange.exchange_name not in oldest_trade_per_exchange:
-                        oldest_trade_per_exchange[exchange.exchange_name] = oldest_trade.timestamp
+                    if exchange_name not in oldest_trade_per_exchange:
+                        oldest_trade_per_exchange[exchange_name] = oldest_trade.timestamp
                     else:
-                        oldest_trade_per_exchange[exchange.exchange_name] = min(
-                            oldest_trade_per_exchange[exchange.exchange_name],
+                        oldest_trade_per_exchange[exchange_name] = min(
+                            oldest_trade_per_exchange[exchange_name],
                             oldest_trade.timestamp
                         )
 
                 logger.info(
-                    f"{exchange.exchange_name}/{exchange.account_name}: "
+                    f"{exchange_name}/{account_name}: "
                     f"Fetched {len(trades)} trades from API, cached {cached_count} new"
                 )
 
             except Exception as e:
-                logger.error(f"Failed to fetch trades from {exchange.account_name}: {e}")
+                failed_exchanges.append(f"{exchange_name}/{account_name}")
+                logger.error(f"Error processing trades from {exchange_name}/{account_name}: {e}")
+
+        # Log timing and success rate
+        elapsed_time = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Parallel trade fetch completed in {elapsed_time:.2f}s "
+            f"({successful_count}/{len(exchanges)} successful)"
+        )
+
+        if failed_exchanges:
+            logger.warning(f"Failed exchanges: {', '.join(failed_exchanges)}")
 
         # Deduplicate API trades
         all_api_trades = deduplicate_trades(all_api_trades)

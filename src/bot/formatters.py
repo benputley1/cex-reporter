@@ -4,10 +4,14 @@ Slack Message Formatters using Block Kit
 Formats bot responses using Slack's Block Kit for rich, interactive messages.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import pandas as pd
 from datetime import datetime
 from src.bot.pnl_config import PnLReport
+from src.bot.error_classifier import format_error_response, ErrorType
+from src.utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class SlackFormatter:
@@ -99,12 +103,12 @@ class SlackFormatter:
 
         return blocks
 
-    def format_table(self, df: pd.DataFrame, title: str = None, max_rows: int = 10) -> List[Dict]:
+    def format_table(self, data: Union[pd.DataFrame, List], title: str = None, max_rows: int = 10) -> List[Dict]:
         """
-        Format DataFrame as Slack table using code block for alignment.
+        Format data as Slack table with improved styling.
 
         Args:
-            df: DataFrame to format
+            data: DataFrame or list to format
             title: Optional table title
             max_rows: Maximum rows to display
 
@@ -115,54 +119,69 @@ class SlackFormatter:
 
         if title:
             blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{title}*"
-                }
+                "type": "header",
+                "text": {"type": "plain_text", "text": title}
             })
 
-        if df.empty:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "_No data found_"
-                }
-            })
-            return blocks
+        # Convert DataFrame or list to formatted text
+        if isinstance(data, pd.DataFrame):
+            df = data
 
-        # Truncate if too many rows
-        display_df = df.head(max_rows)
-        truncated = len(df) > max_rows
-
-        # Format as monospaced table
-        table_str = display_df.to_string(index=False, max_rows=max_rows)
-
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"```\n{table_str}\n```"
-            }
-        })
-
-        if truncated:
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    {
+            if df.empty:
+                blocks.append({
+                    "type": "section",
+                    "text": {
                         "type": "mrkdwn",
-                        "text": f"_Showing {max_rows} of {len(df)} rows_"
+                        "text": "_No data found_"
                     }
-                ]
+                })
+                return blocks
+
+            # Format as monospace text for alignment
+            table_text = "```\n"
+
+            # Limit columns to first 5 for readability
+            display_cols = df.columns[:5]
+            display_df = df[display_cols].head(max_rows)
+
+            # Header row
+            header = " | ".join(f"{col:>12}"[:12] for col in display_cols)
+            table_text += header + "\n"
+            table_text += "-" * len(header) + "\n"
+
+            # Data rows
+            for idx, row in display_df.iterrows():
+                row_text = " | ".join(f"{str(val):>12}"[:12] for val in row.values)
+                table_text += row_text + "\n"
+
+            table_text += "```"
+
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": table_text}
             })
+
+            # Truncation warning
+            if len(df) > max_rows or len(df.columns) > 5:
+                warning_parts = []
+                if len(df) > max_rows:
+                    warning_parts.append(f"Showing {max_rows} of {len(df)} rows")
+                if len(df.columns) > 5:
+                    warning_parts.append(f"Showing 5 of {len(df.columns)} columns")
+
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f"_{' • '.join(warning_parts)}_"
+                    }]
+                })
 
         return blocks
 
     def format_trade_list(self, trades: pd.DataFrame, max_trades: int = 10) -> List[Dict]:
         """
-        Format trade list with details.
+        Format trade list with enhanced visual details.
 
         Args:
             trades: DataFrame of trades
@@ -192,6 +211,8 @@ class SlackFormatter:
             })
             return blocks
 
+        blocks.append({"type": "divider"})
+
         # Show summary stats first
         total_volume = (trades['amount'] * trades['price']).sum()
         avg_price = trades['price'].mean()
@@ -201,11 +222,11 @@ class SlackFormatter:
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Total Volume:*\n${total_volume:,.2f}"
+                    "text": f"*Total Volume:*\n`${total_volume:,.2f}`"
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Avg Price:*\n${avg_price:.6f}"
+                    "text": f"*Avg Price:*\n`${avg_price:.6f}`"
                 }
             ]
         })
@@ -213,20 +234,23 @@ class SlackFormatter:
         blocks.append({"type": "divider"})
 
         # Format individual trades
-        for _, trade in trades.head(max_trades).iterrows():
+        for idx, trade in enumerate(trades.head(max_trades).iterrows()):
+            _, trade = trade  # Unpack tuple from iterrows()
             side_emoji = "🟢" if trade.get('side', 'buy').lower() == 'buy' else "🔴"
+            side_text = "BUY" if trade.get('side', 'buy').lower() == 'buy' else "SELL"
             exchange = trade.get('exchange', 'Unknown')
             timestamp = trade.get('timestamp', '')
             if isinstance(timestamp, pd.Timestamp):
-                timestamp = timestamp.strftime('%Y-%m-%d %H:%M')
+                timestamp = timestamp.strftime('%b %d, %H:%M')
 
             amount = trade.get('amount', 0)
             price = trade.get('price', 0)
             total = amount * price
 
             trade_text = (
-                f"{side_emoji} *{exchange}* - {timestamp}\n"
-                f"  {amount:,.0f} ALKIMI @ ${price:.6f} = ${total:,.2f}"
+                f"{side_emoji} *{side_text}* on {exchange.upper()}\n"
+                f"`{amount:,.0f}` ALKIMI @ `${price:.6f}` = `${total:,.2f}`\n"
+                f"_{timestamp}_"
             )
 
             blocks.append({
@@ -236,6 +260,10 @@ class SlackFormatter:
                     "text": trade_text
                 }
             })
+
+            # Add divider between trades (except after last one)
+            if idx < min(max_trades, len(trades)) - 1:
+                blocks.append({"type": "divider"})
 
         if len(trades) > max_trades:
             blocks.append({
@@ -252,7 +280,7 @@ class SlackFormatter:
 
     def format_balance_summary(self, balances: Dict) -> List[Dict]:
         """
-        Format balance summary by exchange.
+        Format balance summary by exchange with improved card layout.
 
         Args:
             balances: Dict of exchange -> {currency -> amount}
@@ -281,50 +309,104 @@ class SlackFormatter:
             })
             return blocks
 
-        for exchange, assets in balances.items():
-            balance_text = f"*{exchange}*\n"
-            for currency, amount in sorted(assets.items()):
-                if amount > 0:
-                    balance_text += f"  • {currency}: {self._format_number(amount)}\n"
+        # Add divider for visual separation
+        blocks.append({"type": "divider"})
 
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": balance_text
-                }
-            })
+        # Use format_balance_card for each exchange
+        for i, (exchange, assets) in enumerate(balances.items()):
+            # Try to use the card format if it has standard currencies
+            if 'alkimi' in assets or 'usdt' in assets:
+                blocks.append(self.format_balance_card(exchange, assets))
+            else:
+                # Fallback to original format for non-standard currencies
+                balance_text = f"*{exchange.upper()}*\n"
+                for currency, amount in sorted(assets.items()):
+                    if amount > 0:
+                        balance_text += f"  • {currency.upper()}: `{self._format_number(amount)}`\n"
+
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": balance_text
+                    }
+                })
+
+            # Add divider between exchanges (except after last one)
+            if i < len(balances) - 1:
+                blocks.append({"type": "divider"})
 
         return blocks
 
-    def format_error(self, error: str, suggestion: str = None) -> List[Dict]:
+    def format_error(
+        self,
+        error: Union[str, Exception],
+        suggestion: str = None,
+        preserve_details: bool = False
+    ) -> List[Dict]:
         """
-        Format error message with optional suggestion.
+        Format error message with actionable guidance.
+
+        This method now supports intelligent error classification when
+        an Exception is passed. It categorizes errors and provides
+        user-friendly messages with recovery suggestions.
 
         Args:
-            error: Error message
-            suggestion: Optional suggestion for fixing the error
+            error: Error message (str) or Exception to classify
+            suggestion: Optional custom suggestion (overrides auto-suggestion)
+            preserve_details: If True and error is Exception, include technical details
 
         Returns:
             List of Slack Block Kit blocks
+
+        Example:
+            >>> try:
+            ...     # some code that raises an exception
+            ... except Exception as e:
+            ...     blocks = formatter.format_error(e)
+            ...     # Returns user-friendly message with recovery steps
         """
         blocks = []
 
+        # If error is an Exception, use the classifier
+        if isinstance(error, Exception):
+            logger.info(
+                f"Classifying error: {type(error).__name__}: {str(error)}",
+                exc_info=preserve_details
+            )
+
+            # Get user-friendly message and suggestion
+            user_message, auto_suggestion = format_error_response(
+                error,
+                preserve_details=preserve_details
+            )
+
+            # Use custom suggestion if provided, otherwise use auto-generated
+            final_suggestion = suggestion or auto_suggestion
+
+            error_text = user_message
+        else:
+            # Backwards compatibility: treat as string
+            error_text = str(error)
+            final_suggestion = suggestion
+
+        # Create error block
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"❌ *Error*\n{error}"
+                "text": f"❌ *Error*\n{error_text}"
             }
         })
 
-        if suggestion:
+        # Add suggestion if available
+        if final_suggestion:
             blocks.append({
                 "type": "context",
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": f"💡 _{suggestion}_"
+                        "text": f"💡 _{final_suggestion}_"
                     }
                 ]
             })
@@ -528,6 +610,27 @@ class SlackFormatter:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
+                    "text": "*Quick Commands*\nFast access to common queries:"
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "`balance` or `bal` - Quick balance summary\n"
+                        "`price` or `p` - Current ALKIMI price\n"
+                        "`today` - Today's P&L\n"
+                        "`week` - Last 7 days P&L\n"
+                        "`month` - Last 30 days P&L"
+                    )
+                }
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
                     "text": "*Slash Commands*\nUse `/alkimi` followed by:"
                 }
             },
@@ -544,6 +647,7 @@ class SlackFormatter:
                         "`history` - Query history\n"
                         "`config` - P&L configuration\n"
                         "`otc` - OTC transaction management\n"
+                        "`health` - System health status\n"
                         "`help` - Show this help"
                     )
                 }
@@ -626,6 +730,88 @@ class SlackFormatter:
         })
 
         return blocks
+
+    def format_value(self, value: float, prefix: str = "$") -> str:
+        """
+        Format value with color coding (positive/negative).
+
+        Args:
+            value: Value to format
+            prefix: Prefix symbol (default: $)
+
+        Returns:
+            Formatted value string with color indicator
+        """
+        if value >= 0:
+            return f"🟢 +{prefix}{value:,.2f}"
+        else:
+            return f"🔴 {prefix}{value:,.2f}"
+
+    def format_pnl_summary(self, pnl: float, trades: int, period: str) -> List[Dict]:
+        """
+        Format P&L summary with visual indicators.
+
+        Args:
+            pnl: P&L amount
+            trades: Number of trades
+            period: Time period description
+
+        Returns:
+            List of Slack Block Kit blocks
+        """
+        emoji = "📈" if pnl >= 0 else "📉"
+        color = "good" if pnl >= 0 else "danger"
+
+        return [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{emoji} *{period} P&L*\n{self.format_value(pnl)}\n{trades} trades"
+            }
+        }]
+
+    def format_sparkline(self, values: List[float]) -> str:
+        """
+        Generate simple ASCII sparkline for trends.
+
+        Args:
+            values: List of numeric values
+
+        Returns:
+            ASCII sparkline string
+        """
+        if not values:
+            return ""
+
+        min_val, max_val = min(values), max(values)
+        if min_val == max_val:
+            return "─" * len(values)
+
+        chars = "▁▂▃▄▅▆▇█"
+        normalized = [(v - min_val) / (max_val - min_val) for v in values]
+        return "".join(chars[int(n * 7)] for n in normalized)
+
+    def format_balance_card(self, exchange: str, balances: Dict) -> Dict:
+        """
+        Format single exchange balance as a card.
+
+        Args:
+            exchange: Exchange name
+            balances: Dict of currency -> amount
+
+        Returns:
+            Slack Block Kit section block
+        """
+        alkimi = balances.get('alkimi', 0)
+        usdt = balances.get('usdt', 0)
+
+        return {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{exchange.upper()}*\nALKIMI: `{alkimi:,.0f}`\nUSDT: `${usdt:,.2f}`"
+            }
+        }
 
     def _format_currency(self, amount: float) -> str:
         """

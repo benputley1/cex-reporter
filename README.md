@@ -8,25 +8,39 @@
 - **4 CEX Exchanges**: MEXC, Kraken, KuCoin, Gate.io (12 accounts)
 - **All Sui DEXs**: Cetus, Bluefin, Turbos + any new listings via token contract monitoring
 - **Real-time Tracking**: Hourly reports, on-demand queries
-- **Trade Caching**: SQLite persistence beyond API retention limits
+- **Trade Caching**: Async SQLite with connection pooling
+- **Parallel Queries**: 4x faster data fetching with `asyncio.gather`
+- **Duplicate Prevention**: Unique constraints and deduplication
 
 ### AI Analysis (Claude-powered)
 - Natural language queries via Slack bot (`@alkimi-bot`)
+- **60-second timeout** with graceful error handling
+- **20-message context window** with conversation summarization
 - Automated pattern detection
 - Arbitrage opportunity alerts
 - Whale movement tracking
 - Daily briefings for HFT traders
 
 ### Treasury Management
-- Realized P&L tracking (FIFO accounting)
+- Realized P&L tracking (FIFO, LIFO, AVG accounting)
 - Unrealized gains calculation
 - Multi-wallet monitoring
 - Historical daily snapshots
+- **Transfer tracking** (deposits/withdrawals separate from trades)
+- **OTC transaction management**
+
+### Alerts & Monitoring
+- **Whale Alerts**: Automatic alerts for trades >$10K
+- **Price Movement Alerts**: Alerts for >5% price changes in 1 hour
+- **Failure Alerts**: System health alerts with recovery notifications
+- **Health Monitoring**: Component status, latency tracking, circuit breakers
 
 ### Reporting
 - Automated Slack reports (configurable interval)
 - Exchange breakdown with volume metrics
 - Net position tracking
+- **Color-coded values** (green/red for positive/negative)
+- **Sparkline trends** for visual analysis
 - Alert system for significant changes (>5%)
 
 ## Quick Start
@@ -119,7 +133,7 @@ cex-reporter/
 │
 ├── src/
 │   ├── exchanges/               # Exchange clients
-│   │   ├── base.py              # ExchangeInterface
+│   │   ├── base.py              # CCXTExchangeBase with retry & circuit breaker
 │   │   ├── mexc.py              # MEXC client
 │   │   ├── kraken.py            # Kraken client
 │   │   ├── kucoin.py            # KuCoin client
@@ -128,29 +142,46 @@ cex-reporter/
 │   │   └── sui_monitor.py       # Sui token contract monitor
 │   │
 │   ├── analytics/               # Analysis engines
-│   │   ├── simple_tracker.py    # Main reporting engine
+│   │   ├── simple_tracker.py    # Main reporting engine (parallel queries)
 │   │   ├── position_tracker.py  # Position & P&L tracking
 │   │   ├── pnl.py               # FIFO P&L calculations
 │   │   ├── portfolio.py         # Portfolio aggregation
 │   │   └── claude_analyst.py    # AI-powered analysis
 │   │
 │   ├── data/                    # Data management
-│   │   ├── trade_cache.py       # SQLite trade persistence
+│   │   ├── trade_cache.py       # Async SQLite with deduplication
 │   │   ├── daily_snapshot.py    # Daily balance snapshots
 │   │   ├── deposits_loader.py   # Initial deposit tracking
 │   │   └── coingecko_client.py  # Price fallback
 │   │
 │   ├── reporting/               # Output formatting
-│   │   ├── slack.py             # Slack webhook client
+│   │   ├── slack.py             # Slack webhook client (legacy)
 │   │   └── simple_formatter.py  # Report formatting
 │   │
 │   ├── bot/                     # Slack bot interface
-│   │   └── slack_bot.py         # Conversational AI bot
+│   │   ├── slack_bot.py         # AlkimiBot with alerts & commands
+│   │   ├── conversational_agent.py  # LLM agent with context memory
+│   │   ├── formatters.py        # Rich Slack formatting
+│   │   ├── error_classifier.py  # Error categorization
+│   │   └── data_provider.py     # Repository facade
+│   │
+│   ├── repositories/            # Data access layer (NEW)
+│   │   ├── trade_repository.py
+│   │   ├── balance_repository.py
+│   │   ├── snapshot_repository.py
+│   │   ├── query_repository.py
+│   │   ├── thread_repository.py
+│   │   ├── price_repository.py
+│   │   └── otc_repository.py
+│   │
+│   ├── monitoring/              # Health & alerts (NEW)
+│   │   └── health.py            # HealthChecker with component status
 │   │
 │   └── utils/                   # Shared utilities
 │       ├── logging.py           # Structured logging
 │       ├── cache.py             # Response caching
-│       └── trade_deduplication.py
+│       ├── retry.py             # Exponential backoff decorator (NEW)
+│       └── circuit_breaker.py   # Circuit breaker pattern (NEW)
 │
 ├── scripts/                     # Utility scripts
 │   ├── check_balances.py        # Balance checker
@@ -158,8 +189,11 @@ cex-reporter/
 │   ├── price_impact.py          # Price impact analysis
 │   └── cache_stats.py           # Cache statistics
 │
+├── tests/                       # Test suite
+│   └── test_pnl_config.py       # P&L calculation tests (42 tests)
+│
 ├── docs/                        # Documentation
-│   ├── DEX_INTEGRATION_RAILWAY_PLAN.md
+│   ├── CIRCUIT_BREAKER.md       # Circuit breaker guide
 │   └── SUI_DEX_INTEGRATION_PLAN.md
 │
 └── data/                        # Runtime data (git-ignored)
@@ -188,14 +222,26 @@ cex-reporter/
 | `ANTHROPIC_API_KEY` | No | Claude API key |
 | `CLAUDE_MODEL` | No | Model (default: claude-sonnet-4-20250514) |
 | `CLAUDE_ANALYSIS_ENABLED` | No | Enable AI analysis |
+| `AGENT_TIMEOUT_SECONDS` | No | LLM timeout (default: 60) |
+| `MAX_CONTEXT_MESSAGES` | No | Conversation memory (default: 20) |
 | **Slack** | | |
 | `SLACK_WEBHOOK_URL` | Yes | Slack webhook for reports |
 | `SLACK_BOT_TOKEN` | No | Bot token for @alkimi-bot |
 | `SLACK_APP_TOKEN` | No | App token for socket mode |
+| **Alerts** | | |
+| `WHALE_ALERT_THRESHOLD_USD` | No | Whale alert threshold (default: 10000) |
+| `WHALE_ALERT_CHANNEL` | No | Whale alert channel (default: #trading-alerts) |
+| `PRICE_ALERT_THRESHOLD_PERCENT` | No | Price alert threshold (default: 5.0) |
+| `PRICE_ALERT_CHANNEL` | No | Price alert channel (default: #trading-alerts) |
+| `FAILURE_ALERT_CHANNEL` | No | System alert channel (default: #ops-alerts) |
+| `FAILURE_ALERT_THRESHOLD` | No | Consecutive failures before alert (default: 3) |
 | **Application** | | |
 | `MOCK_MODE` | No | Use mock data (default: false) |
 | `LOG_LEVEL` | No | Logging level (default: INFO) |
 | `REPORT_INTERVAL` | No | Report interval in seconds |
+| `EXCHANGE_TIMEOUT_SECONDS` | No | Exchange API timeout (default: 30) |
+| `THREAD_CLEANUP_INTERVAL_HOURS` | No | Thread cleanup interval (default: 6) |
+| `THREAD_RETENTION_DAYS` | No | Thread retention period (default: 7) |
 
 ## Utility Scripts
 
@@ -225,17 +271,41 @@ python scripts/cache_stats.py
 
 Once configured with `SLACK_BOT_TOKEN`, interact with the bot:
 
+### Natural Language Queries
 ```
 @alkimi-bot What was our best performing venue yesterday?
-
 @alkimi-bot Show me the spread between MEXC and Gate.io
-
 @alkimi-bot Summarize overnight activity
-
 @alkimi-bot What arbitrage opportunities exist?
-
 @alkimi-bot What's our total unrealized P&L?
 ```
+
+### Quick Commands
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `/alkimi balance` | `/alkimi bal` | Quick balance summary |
+| `/alkimi price` | `/alkimi p` | Current ALKIMI price |
+| `/alkimi today` | - | Today's P&L |
+| `/alkimi week` | - | Last 7 days P&L |
+| `/alkimi month` | - | Last 30 days P&L |
+| `/alkimi health` | - | System health status |
+| `/alkimi help` | - | Show all commands |
+
+### Slash Commands
+```
+/alkimi pnl              # Full P&L report
+/alkimi sql <query>      # Execute SQL query
+/alkimi run <function>   # Run saved function
+/alkimi functions        # List saved functions
+/alkimi config           # Show P&L config
+/alkimi otc list         # List OTC transactions
+```
+
+### Automatic Alerts
+The bot automatically sends alerts to configured channels:
+- **Whale Alerts**: Trades >$10K → `#trading-alerts`
+- **Price Alerts**: >5% price change → `#trading-alerts`
+- **System Alerts**: Component failures → `#ops-alerts`
 
 ## P&L Calculation
 
@@ -291,6 +361,38 @@ mypy src/                 # Type check
 - `.env.example` contains only placeholder values
 
 ## Changelog
+
+### v3.0.0 (2025-12-13)
+**Major infrastructure and AlkimiBot improvements**
+
+#### Core Infrastructure
+- **Async SQLite**: Migrated to `aiosqlite` with connection pooling
+- **Parallel Queries**: 4x faster data fetching with `asyncio.gather`
+- **Duplicate Prevention**: Unique index on trades, `INSERT OR IGNORE`
+- **API Retry Logic**: Exponential backoff decorator for all exchange calls
+- **Circuit Breakers**: Auto-disable failing exchanges with recovery detection
+- **Transfer Tracking**: Separate deposits/withdrawals from trades
+- **Repository Pattern**: DataProvider decomposed into 7 focused repositories
+- **CCXT Base Class**: Centralized logging and error handling
+
+#### AlkimiBot Enhancements
+- **Agent Timeout**: 60-second timeout with graceful error messages
+- **Error Classification**: User-friendly errors with recovery suggestions
+- **Conversation Memory**: 20-message context window with summarization
+- **Quick Commands**: `/alkimi bal`, `/alkimi p`, `/alkimi today/week/month`
+- **Health Command**: `/alkimi health` shows system status
+- **Response Formatting**: Color-coded values, sparklines, rich Slack blocks
+- **Thread Cleanup**: Automatic background cleanup every 6 hours
+
+#### Alerts & Monitoring
+- **Whale Alerts**: Automatic alerts for trades >$10K
+- **Price Alerts**: Alerts for >5% price changes in 1 hour
+- **Failure Alerts**: System health alerts with recovery notifications
+- **Health Monitoring**: Component status, latency tracking
+
+#### Testing
+- **P&L Tests**: 42 unit tests with 77% coverage
+- All cost basis methods tested (FIFO, LIFO, AVG)
 
 ### v2.0.0 (2025-11-30)
 - Added Sui DEX integration via token contract monitoring

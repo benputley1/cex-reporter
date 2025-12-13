@@ -59,8 +59,9 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
-# Global scheduler reference
+# Global scheduler and bot references
 scheduler = None
+bot_instance = None
 
 
 def job_listener(event):
@@ -73,6 +74,7 @@ def job_listener(event):
 
 async def run_refresh_task():
     """Background task to refresh trade data from exchanges."""
+    global bot_instance
     try:
         logger.info("=" * 40)
         logger.info("SCHEDULED DATA REFRESH STARTING")
@@ -86,8 +88,22 @@ async def run_refresh_task():
 
         logger.info("Scheduled data refresh completed successfully")
 
+        # Record success for failure tracking
+        if bot_instance:
+            await bot_instance.record_success("data_refresh")
+
+        # Check for whale trades if bot is available
+        if bot_instance:
+            logger.info("Checking for whale trades...")
+            await bot_instance.check_for_whale_trades()
+            logger.info("Whale trade check completed")
+
     except Exception as e:
         logger.error(f"Scheduled refresh failed: {e}", exc_info=True)
+
+        # Record failure for alerting
+        if bot_instance:
+            await bot_instance.record_failure("data_refresh", str(e))
 
 
 def check_env_vars():
@@ -233,7 +249,7 @@ def display_startup_banner():
 
 async def main():
     """Main entry point."""
-    global scheduler
+    global scheduler, bot_instance
 
     # Load environment variables from .env file
     load_dotenv()
@@ -247,6 +263,10 @@ async def main():
     display_startup_banner()
 
     try:
+        # Create bot instance first (before scheduler)
+        bot_instance = create_bot()
+        logger.info("AlkimiBot instance created")
+
         # Start background scheduler for data refresh
         refresh_interval = int(os.environ.get("REFRESH_INTERVAL_HOURS", "1"))
         scheduler = AsyncIOScheduler()
@@ -270,13 +290,12 @@ async def main():
         logger.info(f"Background scheduler started - refresh every {refresh_interval} hour(s)")
         logger.info(f"Next scheduled refresh: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Run initial refresh on startup
+        # Run initial refresh on startup (now with bot_instance available)
         logger.info("Running initial data refresh...")
         await run_refresh_task()
 
-        # Create and start bot
-        bot = create_bot()
-        await bot.start()
+        # Start bot
+        await bot_instance.start()
 
     except KeyboardInterrupt:
         logger.info("")

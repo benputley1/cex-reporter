@@ -31,7 +31,9 @@ logger = get_logger(__name__)
 
 # Thread history TTL in seconds (30 minutes)
 THREAD_HISTORY_TTL = 1800
-MAX_HISTORY_MESSAGES = 10
+# Max messages configurable via env var (default 20)
+# This allows users to adjust context window based on their needs
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_CONTEXT_MESSAGES", "20"))
 
 
 # =============================================================================
@@ -488,11 +490,15 @@ class ConversationalAgent:
         # DataProvider kept for conversation logging (MCP tools have their own)
         self.data_provider = data_provider or DataProvider(sui_config=settings.sui_config)
 
+        # Conversation context settings
+        self.max_context_messages = MAX_HISTORY_MESSAGES
+
         # Thread-based conversation memory
         # {thread_ts: {'messages': [...], 'last_access': timestamp}}
         self.thread_history: Dict[str, Dict] = defaultdict(lambda: {'messages': [], 'last_access': 0})
 
         logger.info(f"ConversationalAgent initialized with model: {model} (MCP-enabled)")
+        logger.info(f"Max context messages per thread: {self.max_context_messages}")
 
     def _cleanup_old_threads(self):
         """Remove thread histories that haven't been accessed recently."""
@@ -507,27 +513,153 @@ class ConversationalAgent:
             logger.debug(f"Cleaned up {len(expired_threads)} expired thread histories")
 
     def _add_to_history(self, thread_ts: str, role: str, content: str):
-        """Add a message to thread history."""
+        """
+        Add a message to thread history with timestamp.
+
+        Args:
+            thread_ts: Thread timestamp identifier
+            role: Message role ('user' or 'assistant')
+            content: Message content
+        """
         if not thread_ts:
             return
 
         self.thread_history[thread_ts]['messages'].append({
             'role': role,
-            'content': content
+            'content': content,
+            'timestamp': datetime.now().isoformat()
         })
         self.thread_history[thread_ts]['last_access'] = time.time()
 
-        # Trim to max messages
+        # Trim to max messages (keep most recent)
         if len(self.thread_history[thread_ts]['messages']) > MAX_HISTORY_MESSAGES:
             self.thread_history[thread_ts]['messages'] = \
                 self.thread_history[thread_ts]['messages'][-MAX_HISTORY_MESSAGES:]
 
+            logger.debug(f"Trimmed thread {thread_ts} history to {MAX_HISTORY_MESSAGES} messages")
+
     def _get_history(self, thread_ts: str) -> List[Dict]:
-        """Get conversation history for a thread."""
+        """
+        Get conversation history for a thread.
+
+        Args:
+            thread_ts: Thread timestamp identifier
+
+        Returns:
+            List of message dictionaries with role, content, and timestamp
+        """
         if not thread_ts or thread_ts not in self.thread_history:
             return []
         self.thread_history[thread_ts]['last_access'] = time.time()
         return self.thread_history[thread_ts]['messages']
+
+    def _summarize_long_conversation(self, messages: List[Dict]) -> Optional[str]:
+        """
+        Generate a summary for long conversations to provide context efficiently.
+
+        This helps maintain context awareness when conversations exceed typical limits
+        by summarizing older messages while preserving recent exchanges.
+
+        Args:
+            messages: List of conversation messages
+
+        Returns:
+            Summary string if conversation is long enough, None otherwise
+        """
+        if len(messages) <= 5:
+            return None  # No need to summarize short conversations
+
+        # Create a brief summary of the conversation flow
+        summary_parts = []
+        summary_parts.append("Previous conversation context:")
+
+        # Include first message to show conversation start
+        first_msg = messages[0]
+        if first_msg['role'] == 'user':
+            preview = first_msg['content'][:80]
+            summary_parts.append(f"- Initial query: {preview}...")
+
+        # Count middle messages
+        middle_count = len(messages) - 5
+        if middle_count > 0:
+            summary_parts.append(f"- {middle_count} messages exchanged")
+
+        # Note: The actual recent messages are still passed to the LLM
+        # This summary can be prepended if needed for very long conversations
+        return "\n".join(summary_parts)
+
+    def get_conversation_metadata(self, thread_ts: str) -> Dict[str, Any]:
+        """
+        Get metadata about a conversation thread.
+
+        Args:
+            thread_ts: Thread timestamp identifier
+
+        Returns:
+            Dict with conversation statistics and metadata
+        """
+        if not thread_ts or thread_ts not in self.thread_history:
+            return {
+                "exists": False,
+                "message_count": 0
+            }
+
+        thread_data = self.thread_history[thread_ts]
+        messages = thread_data['messages']
+
+        return {
+            "exists": True,
+            "message_count": len(messages),
+            "last_access": datetime.fromtimestamp(thread_data['last_access']).isoformat(),
+            "first_message_time": messages[0]['timestamp'] if messages else None,
+            "last_message_time": messages[-1]['timestamp'] if messages else None,
+            "max_messages": MAX_HISTORY_MESSAGES
+        }
+
+    def clear_context(self, thread_ts: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Clear conversation context for one or all threads.
+
+        Useful for resetting conversation state or managing memory usage.
+
+        Args:
+            thread_ts: Thread timestamp to clear. If None, clears all threads.
+
+        Returns:
+            Dict with information about what was cleared
+        """
+        if thread_ts:
+            if thread_ts in self.thread_history:
+                message_count = len(self.thread_history[thread_ts]['messages'])
+                del self.thread_history[thread_ts]
+                logger.info(f"Cleared context for thread {thread_ts} ({message_count} messages)")
+                return {
+                    "success": True,
+                    "cleared": "single_thread",
+                    "thread_ts": thread_ts,
+                    "messages_cleared": message_count
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Thread not found",
+                    "thread_ts": thread_ts
+                }
+        else:
+            # Clear all threads
+            thread_count = len(self.thread_history)
+            total_messages = sum(
+                len(data['messages'])
+                for data in self.thread_history.values()
+            )
+            self.thread_history.clear()
+            logger.info(f"Cleared all conversation contexts ({thread_count} threads, {total_messages} messages)")
+            return {
+                "success": True,
+                "cleared": "all_threads",
+                "threads_cleared": thread_count,
+                "messages_cleared": total_messages
+            }
 
     async def _execute_tool(self, tool_name: str, tool_input: Dict, user_id: str) -> str:
         """
@@ -591,23 +723,37 @@ class ConversationalAgent:
         # Track processing time
         start_time = time.time()
 
+        # Get conversation history
+        history = self._get_history(thread_ts)
+        history_count = len(history)
+
         # Log incoming query for system prompt improvement analysis
-        logger.info(f"USER_QUERY | user={user_id} | thread={thread_ts or 'none'} | query={message[:200]}")
+        logger.info(f"USER_QUERY | user={user_id} | thread={thread_ts or 'none'} | history_msgs={history_count} | query={message[:200]}")
 
         # Build system prompt with current date
         system = SYSTEM_PROMPT.format(current_date=date.today().isoformat())
 
         # Build messages array with history
         messages = []
-        history = self._get_history(thread_ts)
 
+        # Add conversation history (already includes role, content, timestamp)
+        # We only send role and content to Claude API (timestamp is for our records)
         for msg in history:
-            messages.append(msg)
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+        # Optional: Generate summary for very long conversations
+        # Currently we just pass all messages, but summary could be prepended if needed
+        summary = self._summarize_long_conversation(history)
+        if summary:
+            logger.debug(f"Generated summary for thread {thread_ts}: {summary}")
 
         # Add current message
         messages.append({"role": "user", "content": message})
 
-        # Add to history
+        # Add to history with timestamp
         self._add_to_history(thread_ts, "user", message)
 
         try:

@@ -23,6 +23,7 @@ from src.exchanges.base import (
 )
 from src.utils.cache import cached
 from src.utils.logging import get_logger
+from src.utils.retry import retry_with_backoff
 from config.settings import settings
 
 
@@ -74,6 +75,7 @@ class CetusClient(ExchangeInterface):
             'positions': []
         }
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     async def initialize(self) -> None:
         """
         Initialize Cetus client connection.
@@ -147,6 +149,7 @@ class CetusClient(ExchangeInterface):
             logger.error(f"Error fetching Cetus liquidity: {e}")
             return {}
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     @cached(ttl=60)
     async def get_balances(self) -> Dict[str, Dict[str, float]]:
         """
@@ -227,6 +230,7 @@ class CetusClient(ExchangeInterface):
         except Exception as e:
             self._handle_error(e, "get_balances")
 
+    @retry_with_backoff(max_retries=3, initial_delay=2.0)
     @cached(ttl=60)
     async def get_trades(self, since: datetime) -> List[Trade]:
         """
@@ -271,6 +275,7 @@ class CetusClient(ExchangeInterface):
         """
         return []
 
+    @retry_with_backoff(max_retries=3, initial_delay=1.0)
     @cached(ttl=60)
     async def get_prices(self, symbols: List[str]) -> Dict[str, float]:
         """

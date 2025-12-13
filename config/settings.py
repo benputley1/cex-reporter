@@ -254,6 +254,11 @@ class Settings:
         return int(os.getenv('REPORT_INTERVAL', '14400'))
 
     @property
+    def exchange_timeout_seconds(self) -> float:
+        """Exchange API timeout in seconds (default: 30)"""
+        return float(os.getenv('EXCHANGE_TIMEOUT_SECONDS', '30.0'))
+
+    @property
     def alert_threshold_percent(self) -> float:
         """Alert threshold as percentage"""
         return float(os.getenv('ALERT_THRESHOLD_PERCENT', '5.0'))
